@@ -27,7 +27,10 @@ Run the main CLI:
 python go.py [COMMAND] [OPTIONS]
 ```
 
-### tree
+
+---
+
+## 🚩 tree
 
 Display a directory tree.
 
@@ -40,7 +43,9 @@ python go.py tree [PATH] [--depth DEPTH] [--hidden]
 - `--depth`, `-d`: Maximum depth to display (default: unlimited).
 - `--hidden`, `-h`: Skip hidden files and directories.
 
-### youtube
+---
+
+## 🚩 youtube
 
 Download YouTube content or show metadata.
 
@@ -55,6 +60,8 @@ python go.py youtube [URL] [--video] [--audio] [--subtitle]
 - `--subtitle`, `-s`: Download English subtitles.
 
 If no flags are provided, metadata for the video is displayed.
+
+---
 
 ## Project Structure
 
