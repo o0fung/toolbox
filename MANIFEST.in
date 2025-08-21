@@ -1,0 +1,7 @@
+# Include important project files in the source distribution
+include README.md
+include LICENSE
+include requirements.txt
+
+# Include package data specified by include_package_data=True
+recursive-include tools *

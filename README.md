@@ -15,14 +15,24 @@ A set of useful command-line tools for enhancing productivity.
 	git clone https://github.com/o0fung/toolbox.git
 	cd toolbox
 	```
-2. Install dependencies:
+2. Install via pip (from Git):
 	```sh
-	pip install -r requirements.txt
+	pip install "git+https://github.com/o0fung/toolbox.git"
 	```
+
+Or for local development:
+```sh
+pip install -r requirements.txt
+```
 
 ## Usage
 
-Run the main CLI:
+Run the installed CLI:
+```sh
+toolbox --help
+```
+
+Or run via Python entry point in this repo:
 ```sh
 python go.py [COMMAND] [OPTIONS]
 ```
