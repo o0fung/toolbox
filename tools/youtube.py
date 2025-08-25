@@ -2,12 +2,12 @@ import typer
 import yt_dlp  # for downloading YouTube content
 
 
-app = typer.Typer()
+# User can access help message with shortcut -h
+app = typer.Typer(context_settings={"help_option_names": ["-h", "--help"]})
 
 
 # Main CLI entry point, allows invocation without subcommand (entry from go.py)
 @app.callback()
-
 def youtube(
     url: str = typer.Argument(..., help='YouTube video URL'),
     video: bool = typer.Option(False, '-v', '--video', help='Download best video in mp4'),
@@ -31,7 +31,7 @@ def youtube(
     if not (video or audio or subtitle):
         with yt_dlp.YoutubeDL({}) as ydl:
             info = ydl.extract_info(url, download=False)  # Extract metadata only
-            show_meta(info)
+            _show_meta(info)
         return
 
     # Set output filename template
@@ -64,7 +64,7 @@ def youtube(
     # Download requested content and show metadata
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         result = ydl.extract_info(url, download=True)
-        show_meta(result)
+        _show_meta(result)
 
     # Indicate which content types were downloaded
     print('>> Downloaded Video : ', 'OK' if video else 'None')
@@ -159,7 +159,7 @@ params = [
 ]
 
 
-def show_meta(info):
+def _show_meta(info):
     """
     Display selected metadata fields from the info dict.
     Shows first 5 lines of description, if present.

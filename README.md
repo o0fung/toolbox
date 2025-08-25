@@ -7,7 +7,7 @@ A set of useful command-line tools for enhancing productivity.
 
 - **tree**: Display a directory tree with optional depth and hidden file skipping.
 - **youtube**: Download YouTube videos, audio, and subtitles, or display video metadata.
-- **clock**: Full-screen seven-segment terminal clock (press Ctrl+C to exit).
+- **clock**: Full-screen seven-segment terminal clock with stopwatch and countdown.
 
 ## Installation
 
@@ -59,12 +59,12 @@ Display a directory tree.
 
 **Usage:**
 ```sh
-python go.py tree [PATH] [--depth DEPTH] [--hidden]
+python go.py tree [PATH] [--depth DEPTH] [--skip-hidden]
 ```
 
 - `PATH`: Root directory to display.
 - `--depth`, `-d`: Maximum depth to display (default: unlimited).
-- `--hidden`, `-h`: Skip hidden files and directories.
+- `--skip-hidden`, `-s`: Skip hidden files and directories.
 
 ---
 
@@ -92,17 +92,33 @@ Full-screen digital clock rendered with block characters using Rich. Updates eve
 
 **Usage:**
 ```sh
-# If installed as a package
-toolbox clock
+# Clock (from the repo)
+python go.py clock [-c COLOR] [-s SIZE]
 
-# From the repo
-python go.py clock
+# Stopwatch (counts up)
+python go.py clock timer [-c COLOR] [-s SIZE]
+
+# Countdown (flexible input)
+#   S           -> seconds
+#   H M         -> hours minutes
+#   H M S       -> hours minutes seconds
+# Non-digit separators like spaces, ':', ',', '/' are accepted.
+python go.py clock countdown 45			// 45 seconds
+python go.py clock countdown 1 10		// 1 minute 10 seconds
+python go.py clock countdown 1 0 1		// 1 hour and 1 second
+python go.py clock countdown 2:15:00 -s xlarge -c magenta		// 2 hours 15 minutes
 ```
 
-- The trailing `.` argument is currently required by the CLI but ignored by the clock.
 - Press `Ctrl+C` to quit.
 
-Optional tweak inside code: adjust digit thickness/spacing by changing `inner` and `gap` in `render_big_time()`.
+Options:
+- `--color`, `-c`: Rich color style for digits (e.g., cyan, magenta, "#00ff00").
+- `--size`, `-s`: Size preset. One of: `small`, `medium`, `large`, `xlarge`, `xxlarge`, `xxxlarge`.
+
+Notes:
+- When running `clock` without a subcommand, the live clock UI starts.
+- When running a subcommand (`timer`, `countdown`), the clock UI callback does not run.
+- The countdown holds at `00:00:00` until you press `Ctrl+C`.
 
 ---
 
@@ -113,7 +129,7 @@ go.py                # Main CLI entry point
 tools/
   tree.py            # Directory tree tool
   youtube.py         # YouTube downloader tool
-	clock.py           # Full-screen seven-segment terminal clock
+  clock.py           # Full-screen seven-segment terminal clock
 ```
 
 ## License
