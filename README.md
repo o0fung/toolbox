@@ -42,12 +42,12 @@ pip install -U --force-reinstall "git+https://github.com/o0fung/toolbox.git"
 
 Run the installed CLI:
 ```sh
-toolbox --help
+lf --help
 ```
 
 Or run via Python entry point in this repo:
 ```sh
-python go.py [COMMAND] [OPTIONS]
+python cli.py [COMMAND] [OPTIONS]
 ```
 
 
@@ -59,7 +59,7 @@ Display a directory tree.
 
 **Usage:**
 ```sh
-python go.py tree [PATH] [--depth DEPTH] [--skip-hidden]
+python cli.py tree [PATH] [--depth DEPTH] [--skip-hidden]
 ```
 
 - `PATH`: Root directory to display.
@@ -74,7 +74,7 @@ Download YouTube content or show metadata.
 
 **Usage:**
 ```sh
-python go.py youtube [URL] [--video] [--audio] [--subtitle]
+python cli.py youtube [URL] [--video] [--audio] [--subtitle]
 ```
 
 - `URL`: YouTube video URL.
@@ -93,20 +93,20 @@ Full-screen digital clock rendered with block characters using Rich. Updates eve
 **Usage:**
 ```sh
 # Clock (from the repo)
-python go.py clock [-c COLOR] [-s SIZE]
+python cli.py clock [-c COLOR] [-s SIZE]
 
 # Stopwatch (counts up)
-python go.py clock timer [-c COLOR] [-s SIZE]
+python cli.py clock timer [-c COLOR] [-s SIZE]
 
 # Countdown (flexible input)
 #   S           -> seconds
 #   H M         -> hours minutes
 #   H M S       -> hours minutes seconds
 # Non-digit separators like spaces, ':', ',', '/' are accepted.
-python go.py clock countdown 45			// 45 seconds
-python go.py clock countdown 1 10		// 1 minute 10 seconds
-python go.py clock countdown 1 0 1		// 1 hour and 1 second
-python go.py clock countdown 2:15:00 -s xlarge -c magenta		// 2 hours 15 minutes
+python cli.py clock countdown 45			// 45 seconds
+python cli.py clock countdown 1 10		// 1 minute 10 seconds
+python cli.py clock countdown 1 0 1		// 1 hour and 1 second
+python cli.py clock countdown 2:15:00 -s xlarge -c magenta		// 2 hours 15 minutes
 ```
 
 - Press `Ctrl+C` to quit.
@@ -125,7 +125,7 @@ Notes:
 ## Project Structure
 
 ```
-go.py                # Main CLI entry point
+cli.py               # Main CLI entry point
 tools/
   tree.py            # Directory tree tool
   youtube.py         # YouTube downloader tool

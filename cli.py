@@ -29,12 +29,12 @@ from tools import clock
 app = typer.Typer(context_settings={"help_option_names": ["-h", "--help"]})
 
 # Mount sub-apps under their command names. With invoke_without_command=True,
-# running, e.g., `py go.py clock` executes clock's default callback.
+# running, e.g., `py cli.py clock` executes clock's default callback.
 app.add_typer(tree.app, name='tree', invoke_without_command=True)
 app.add_typer(youtube.app, name='youtube', invoke_without_command=True)
 app.add_typer(clock.app, name='clock', invoke_without_command=True)
 
 
 if __name__ == '__main__':
-        # Delegate to Typer's CLI runner
-        app()
+    # Delegate to Typer's CLI runner
+    app()

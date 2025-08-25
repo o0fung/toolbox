@@ -2,6 +2,7 @@
 include README.md
 include LICENSE
 include requirements.txt
+include cli.py
 
 # Include package data specified by include_package_data=True
 recursive-include tools *
