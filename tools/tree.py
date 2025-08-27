@@ -45,8 +45,8 @@ def rename(
     then execute it for each file discovered under the provided path.
 
     Defaults:
-    - module: 'rename' (expects a file named rename.py next to path)
-    - func:   'rename' (expects a callable named rename in that file)
+    - module: 'script' (expects a file named script.py next to path)
+    - func:   'test' (expects a callable named test in that file)
     - recursive: process subfolders when path is a directory
     """
     path = os.path.expanduser(path)

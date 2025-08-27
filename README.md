@@ -5,7 +5,7 @@ A set of useful command-line tools for enhancing productivity.
 
 ## Features
 
-- **tree**: Display a directory tree with optional depth and hidden file skipping.
+- **tree**: Display a directory tree with optional depth/hidden skipping, plus a flexible batch file renamer that imports your function from a sibling Python file.
 - **youtube**: Download YouTube videos, audio, and subtitles, or display video metadata.
 - **clock**: Full-screen seven-segment terminal clock with stopwatch and countdown.
 
@@ -59,12 +59,59 @@ Display a directory tree.
 
 **Usage:**
 ```sh
-python cli.py tree [PATH] [--depth DEPTH] [--skip-hidden]
+python cli.py tree show [PATH] [--depth DEPTH] [--skip-hidden]
 ```
 
 - `PATH`: Root directory to display.
 - `--depth`, `-d`: Maximum depth to display (default: unlimited).
 - `--skip-hidden`, `-s`: Skip hidden files and directories.
+
+### Batch rename helper
+
+Import and execute a function from a Python module located in the same folder as the target file/folder. The function will be called for each discovered file.
+
+Usage:
+```sh
+# Installed entrypoint
+lf tree rename PATH [-m MODULE] [-f FUNC] [-r]
+
+# From the repo
+python cli.py tree rename PATH [-m MODULE] [-f FUNC] [-r]
+```
+
+Options:
+- `PATH` (required): A file or a directory. If a directory, all files in it are processed; with `-r/--recursive`, subdirectories are included.
+- `-m, --module` (default: `script`): Python module name (without `.py`) in the same folder as `PATH` to import.
+- `-f, --func` (default: `test`): Function name to call inside the module. It should accept a single `filepath: str` argument. If the function returns a non-None value, it will be printed.
+- `-r, --recursive`: Recurse into subdirectories when `PATH` is a directory.
+
+Behavior niceties:
+- If the module file doesn’t exist, an empty file will be created.
+- If the function doesn’t exist in the module, a stub will be appended automatically so you can fill it in.
+
+Example stub and runs:
+```py
+# In the same folder as your files, create script.py with:
+from pathlib import Path
+
+def test(filepath: str):
+	p = Path(filepath)
+	if p.suffix.lower() == ".txt":
+		new = p.with_name(p.stem + "_bak" + p.suffix)
+		p.rename(new)
+		return f"Renamed: {p.name} -> {new.name}"
+```
+
+```sh
+# Rename .txt files in a folder (non-recursive)
+lf tree rename ~/docs -m script -f test
+
+# Recursive processing
+lf tree rename ~/docs -m script -f test -r
+
+# Single file
+lf tree rename ~/docs/notes.txt -m script -f test
+```
 
 ---
 
