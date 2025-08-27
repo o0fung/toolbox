@@ -2,6 +2,7 @@ import typer
 import os
 import sys
 import importlib
+import shutil
 
 from rich.tree import Tree      # for display tree directory
 from rich import print
@@ -60,11 +61,23 @@ def rename(
 
     # Make sure the module file is available
     if not os.path.isfile(module_file):
-        # Create an empty module file if it doesn't exist
+        # Copy template tools/script.py into place when creating a new module file
         try:
-            with open(module_file, 'w', encoding='utf-8') as f:
-                f.write("")
-            typer.secho(f"Created missing module file: {module_file}", fg=typer.colors.YELLOW)
+            template_path = os.path.join(os.path.dirname(__file__), 'script.py')
+            if os.path.isfile(template_path):
+                shutil.copyfile(template_path, module_file)
+                typer.secho(
+                    f"Created module from template: {module_file}",
+                    fg=typer.colors.YELLOW,
+                )
+            else:
+                # Fallback: create an empty file if template is missing
+                with open(module_file, 'w', encoding='utf-8') as f:
+                    f.write("")
+                typer.secho(
+                    f"Template not found. Created empty module file: {module_file}",
+                    fg=typer.colors.YELLOW,
+                )
         except Exception as e:
             typer.secho(f"Failed to create module file '{module_file}': {e}", fg=typer.colors.RED)
             raise typer.Exit(code=1)
