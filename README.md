@@ -5,7 +5,7 @@ A set of useful command-line tools for enhancing productivity.
 
 ## Features
 
-- **tree**: Display a directory tree with optional depth/hidden skipping, plus a flexible batch file renamer that imports your function from a sibling Python file.
+- **tree**: Display a directory tree with optional depth/hidden skipping, plus a flexible batch file processor that imports your function from a sibling Python file.
 - **youtube**: Download YouTube videos, audio, and subtitles, or display video metadata.
 - **clock**: Full-screen seven-segment terminal clock with stopwatch and countdown.
 
@@ -59,24 +59,24 @@ Display a directory tree.
 
 **Usage:**
 ```sh
-python cli.py tree show [PATH] [--depth DEPTH] [--skip-hidden]
+python cli.py tree show PATH [--depth DEPTH] [--skip-hidden]
 ```
 
 - `PATH`: Root directory to display.
 - `--depth`, `-d`: Maximum depth to display (default: unlimited).
 - `--skip-hidden`, `-s`: Skip hidden files and directories.
 
-### Batch rename helper
+### Batch file processor
 
 Import and execute a function from a Python module located in the same folder as the target file/folder. The function will be called for each discovered file.
 
 Usage:
 ```sh
 # Installed entrypoint
-lf tree rename PATH [-m MODULE] [-f FUNC] [-r]
+lf tree process PATH [-m MODULE] [-f FUNC] [-r]
 
 # From the repo
-python cli.py tree rename PATH [-m MODULE] [-f FUNC] [-r]
+python cli.py tree process PATH [-m MODULE] [-f FUNC] [-r]
 ```
 
 Options:
@@ -86,8 +86,8 @@ Options:
 - `-r, --recursive`: Recurse into subdirectories when `PATH` is a directory.
 
 Behavior niceties:
-- If the module file doesn’t exist, an empty file will be created.
-- If the function doesn’t exist in the module, a stub will be appended automatically so you can fill it in.
+- If the module file doesnt exist, a template is copied from `tools/script.py` to help you start quickly.
+- If the function doesnt exist in the module, a stub will be appended automatically so you can fill it in.
 
 Example stub and runs:
 ```py
@@ -104,13 +104,13 @@ def test(filepath: str):
 
 ```sh
 # Rename .txt files in a folder (non-recursive)
-lf tree rename ~/docs -m script -f test
+lf tree process ~/docs -m script -f test
 
 # Recursive processing
-lf tree rename ~/docs -m script -f test -r
+lf tree process ~/docs -m script -f test -r
 
 # Single file
-lf tree rename ~/docs/notes.txt -m script -f test
+lf tree process ~/docs/notes.txt -m script -f test
 ```
 
 ---
