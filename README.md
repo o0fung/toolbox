@@ -8,6 +8,7 @@ A set of useful command-line tools for enhancing productivity.
 - **tree**: Display a directory tree with optional depth/hidden skipping, plus a flexible batch file processor that imports your function from a sibling Python file.
 - **youtube**: Download YouTube videos, audio, and subtitles, or display video metadata.
 - **clock**: Full-screen seven-segment terminal clock with stopwatch and countdown.
+- **cheque**: Convert integer amounts to formal HK cheque wording in Traditional Chinese and English.
 
 ## Installation
 
@@ -169,6 +170,55 @@ Notes:
 
 ---
 
+## 🚩 cheque
+
+Render whole-dollar amounts as formal wording for Hong Kong cheques in both Traditional Chinese and English.
+
+Usage:
+```sh
+# From the repo
+python cli.py cheque AMOUNT
+```
+
+- `AMOUNT`: Non-negative integer, in Hong Kong dollars (no cents). Examples: `0`, `10`, `1234567`.
+
+Output format:
+- Chinese: `中文：港幣<FINANCIAL_UPPERCASE>元正`
+- English: `English: Hong Kong Dollars <words> only`
+
+Rules implemented:
+- Chinese uses financial uppercase numerals (壹貳叁肆伍陸柒捌玖零) with units: 仟佰拾 within each group and 萬/億/兆 across groups.
+- Inserts a single `零` where a unit gap is present (e.g., 1001 -> 壹仟零壹；1000001 -> 壹佰萬零壹)。
+- English follows British/HK style:
+	- Uses "and" within hundreds (e.g., one hundred and two).
+	- Uses "and" between the last group (<100) and a higher group (e.g., one thousand and ten).
+	- Hyphenates 21–99 (e.g., twenty-one).
+
+Examples:
+```text
+python cli.py cheque 0
+中文：港幣零元正
+English: Hong Kong Dollars Zero only
+
+python cli.py cheque 1001
+中文：港幣壹仟零壹元正
+English: Hong Kong Dollars One thousand and one only
+
+python cli.py cheque 1000001
+中文：港幣壹佰萬零壹元正
+English: Hong Kong Dollars One million and one only
+
+python cli.py cheque 120034
+中文：港幣壹拾貳萬零叁拾肆元正
+English: Hong Kong Dollars One hundred and twenty thousand and thirty-four only
+```
+
+Notes:
+- Extend English scales beyond trillion by editing `tools/cheque.py` if needed.
+- If cents are required in the future, the helpers can be expanded to include sub-dollar parts.
+
+---
+
 ## Project Structure
 
 ```
@@ -177,6 +227,7 @@ tools/
   tree.py            # Directory tree tool
   youtube.py         # YouTube downloader tool
   clock.py           # Full-screen seven-segment terminal clock
+	cheque.py          # HK cheque wording (Chinese + English)
 ```
 
 ## License

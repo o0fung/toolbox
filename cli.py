@@ -23,6 +23,7 @@ import typer
 from tools import tree
 from tools import youtube
 from tools import clock
+from tools import cheque
 
 
 # Root Typer app; expose -h/--help on all levels
@@ -33,6 +34,7 @@ app = typer.Typer(context_settings={"help_option_names": ["-h", "--help"]})
 app.add_typer(tree.app, name='tree', invoke_without_command=False)
 app.add_typer(youtube.app, name='youtube', invoke_without_command=True)
 app.add_typer(clock.app, name='clock', invoke_without_command=True)
+app.add_typer(cheque.app, name='cheque', invoke_without_command=True)
 
 
 if __name__ == '__main__':
