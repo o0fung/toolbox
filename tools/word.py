@@ -165,6 +165,7 @@ def plot(
     csv_path: str = typer.Argument(..., help="Path to CSV file"),
     delimiter: Optional[str] = typer.Option(None, "-d", "--delimiter", help="CSV delimiter (auto if omitted)"),
     title: Optional[str] = typer.Option(None, "-t", "--title", help="Window title"),
+    save: bool = typer.Option(False, "-s", "--save", help="Also save a high-res PNG next to the CSV (same name, .png)"),
 ):
     """Plot CSV columns using pyqtgraph with subplots per data column.
 
@@ -230,6 +231,28 @@ def plot(
         if first_plot is None:
             first_plot = p
 
+
+    # Ensure layouts are finalized before exporting or showing
+    app_qt.processEvents()
+
+    if save:
+        try:
+            from pyqtgraph.exporters import ImageExporter  # type: ignore
+
+            # Export the entire layout at higher resolution
+            target_item = getattr(win, "ci", None) or first_plot
+            exporter = ImageExporter(target_item)
+            exporter.parameters()["width"] = 2400  # ~high-res width, aspect preserved
+
+            base, _ = os.path.splitext(os.path.expanduser(csv_path))
+            out_path = base + ".png"
+            exporter.export(out_path)
+            print(f"[green]Saved PNG[/green]: {out_path}")
+        except Exception as e:
+            print(f"[red]Failed to export PNG[/red]: {e}")
+        return  # do not enter UI loop when saving only
+
+    # Interactive mode
     win.show()
     app_qt.exec()
 
