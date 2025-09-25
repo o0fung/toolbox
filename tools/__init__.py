@@ -4,4 +4,5 @@ __all__ = [
     "tree",
     "youtube",
     "cheque",
+    "word",
 ]

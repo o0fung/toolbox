@@ -9,6 +9,7 @@ A set of useful command-line tools for enhancing productivity.
 - **youtube**: Download YouTube videos, audio, and subtitles, or display video metadata.
 - **clock**: Full-screen seven-segment terminal clock with stopwatch and countdown.
 - **cheque**: Convert integer amounts to formal HK cheque wording in Traditional Chinese and English.
+- **word**: Plot CSV data with pyqtgraph subplots; auto-detect time/index X-axis and plot all data-like columns.
 
 ## Installation
 
@@ -74,28 +75,29 @@ Import and execute a function from a Python module located in the same folder as
 Usage:
 ```sh
 # Installed entrypoint
-lf tree process PATH [-m MODULE] [-f FUNC] [-r]
+lf tree work PATH [-d DEPTH] [--skip-hidden] [-m MODULE] [-f FUNC]
 
 # From the repo
-python cli.py tree process PATH [-m MODULE] [-f FUNC] [-r]
+python cli.py tree work PATH [-d DEPTH] [--skip-hidden] [-m MODULE] [-f FUNC]
 ```
 
 Options:
-- `PATH` (required): A file or a directory. If a directory, all files in it are processed; with `-r/--recursive`, subdirectories are included.
-- `-m, --module` (default: `script`): Python module name (without `.py`) in the same folder as `PATH` to import.
-- `-f, --func` (default: `test`): Function name to call inside the module. It should accept a single `filepath: str` argument. If the function returns a non-None value, it will be printed.
-- `-r, --recursive`: Recurse into subdirectories when `PATH` is a directory.
+- `PATH` (required): A file or a directory. If a directory, items are processed up to the specified depth.
+- `-d, --depth` (default: 1): Maximum depth when displaying/processing.
+- `-s, --skip-hidden`: Skip hidden/special files (dot- or underscore-prefixed).
+- `-m, --module` (default: `_script`): Python module name (without `.py`) in the same folder as `PATH` to import.
+- `-f, --func` (default: `_test`): Function name to call inside the module. It should accept a single `filepath: str` argument. If the function returns a non-None string, it will be shown on that file’s line.
 
 Behavior niceties:
-- If the module file doesnt exist, a template is copied from `tools/script.py` to help you start quickly.
-- If the function doesnt exist in the module, a stub will be appended automatically so you can fill it in.
+- If the module file doesn’t exist, a template is copied from `tools/_script.py` to help you start quickly.
+- If the function doesn’t exist in the module, a stub will be appended automatically so you can fill it in.
 
 Example stub and runs:
 ```py
-# In the same folder as your files, create script.py with:
+# In the same folder as your files, create _script.py with:
 from pathlib import Path
 
-def test(filepath: str):
+def _test(filepath: str):
 	p = Path(filepath)
 	if p.suffix.lower() == ".txt":
 		new = p.with_name(p.stem + "_bak" + p.suffix)
@@ -104,14 +106,11 @@ def test(filepath: str):
 ```
 
 ```sh
-# Rename .txt files in a folder (non-recursive)
-lf tree process ~/docs -m script -f test
+# Rename .txt files in a folder (depth 1)
+lf tree work ~/docs -m _script -f _test
 
-# Recursive processing
-lf tree process ~/docs -m script -f test -r
-
-# Single file
-lf tree process ~/docs/notes.txt -m script -f test
+# Show tree only
+lf tree show ~/docs -d 2 -s
 ```
 
 ---
@@ -219,6 +218,44 @@ Notes:
 
 ---
 
+## 🚩 word
+
+Plot CSV columns in a PyQt6/pyqtgraph window. The first column is used as the X-axis if it is time-like (timestamps or parseable datetimes) or numeric index-like; otherwise, row index is used. Every other column that’s mostly numeric becomes a subplot.
+
+**Usage:**
+```sh
+# From the repo
+python cli.py word plot FILE [--delimiter DELIM] [--title TITLE]
+
+# Installed entrypoint
+lf word plot FILE [--delimiter DELIM] [--title TITLE]
+```
+
+Options:
+- `FILE` (required): CSV/TSV file path.
+- `-d, --delimiter`: CSV delimiter. If omitted, it’s auto-detected (commas, tabs, semicolons, pipes, space).
+- `-t, --title`: Window title.
+
+Behavior:
+- X-axis detection:
+	- Time-like: ISO-ish strings or values parseable by python-dateutil (if installed); numeric epochs in seconds (>1e9) or milliseconds (>1e12).
+	- Index-like: numeric first column.
+	- Otherwise: row index 0..N-1.
+- Y-columns: columns with at least ~60% numeric values are treated as “data-like” and each gets its own subplot. Non-numeric/missing values become gaps.
+- Time X-axis uses pyqtgraph’s `DateAxisItem`.
+
+Examples:
+```sh
+lf word plot ~/data/sensors.csv
+lf word plot ~/data/log.tsv -d $'\t' -t "Device Log"
+```
+
+Requirements:
+- GUI environment (macOS, Windows, or X11/Wayland Linux desktop).
+- Python packages are installed automatically via requirements: `PyQt6`, `pyqtgraph`. For broader date parsing, you can `pip install python-dateutil` (optional).
+
+---
+
 ## Project Structure
 
 ```
@@ -228,6 +265,7 @@ tools/
   youtube.py         # YouTube downloader tool
   clock.py           # Full-screen seven-segment terminal clock
 	cheque.py          # HK cheque wording (Chinese + English)
+	word.py            # CSV plotting with pyqtgraph (PyQt6)
 ```
 
 ## License

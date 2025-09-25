@@ -24,6 +24,7 @@ from tools import tree
 from tools import youtube
 from tools import clock
 from tools import cheque
+from tools import word
 
 
 # Root Typer app; expose -h/--help on all levels
@@ -35,6 +36,7 @@ app.add_typer(tree.app, name='tree', invoke_without_command=False)
 app.add_typer(youtube.app, name='youtube', invoke_without_command=True)
 app.add_typer(clock.app, name='clock', invoke_without_command=True)
 app.add_typer(cheque.app, name='cheque', invoke_without_command=True)
+app.add_typer(word.app, name='word', invoke_without_command=True)
 
 
 if __name__ == '__main__':
