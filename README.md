@@ -117,19 +117,61 @@ lf tree show ~/docs -d 2 -s
 
 ## 🚩 youtube
 
-Download YouTube content or show metadata.
+Download YouTube content, list formats, or show metadata (powered by `yt-dlp`).
 
-**Usage:**
+**Basic Usage:**
 ```sh
-python cli.py youtube [URL] [--video] [--audio] [--subtitle]
+python cli.py youtube URL [options]
 ```
 
-- `URL`: YouTube video URL.
-- `--video`, `-v`: Download best video in mp4 format.
-- `--audio`, `-a`: Download best audio as mp3.
-- `--subtitle`, `-s`: Download English subtitles.
+If no download-related flags are given, metadata only is displayed.
 
-If no flags are provided, metadata for the video is displayed.
+**Common Flags:**
+- `URL` (positional): YouTube video URL.
+- `--video`, `-v`: Download best video (mp4-preferred) with audio using smart fallback formats.
+- `--audio`, `-a`: Download best audio and convert to mp3 (192 kbps) via ffmpeg.
+- `--subtitle`, `-s`: Download English subtitles (manual + auto). Use with other modes or alone (metadata + subs).
+- `--list`: List all available formats (no download) in a compact table.
+- `--fmt FORMAT_EXPR`: Explicit yt-dlp format selector (e.g. `251`, `137+251`, `bestvideo[height<=720]+bestaudio/best`). Overrides `-v/-a` logic.
+- `--out DIR`: Output directory (default: `~/Desktop`). Created if missing.
+
+**Format Fallback Logic (when using `-v` without `--fmt`):**
+1. `bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]`
+2. `bestvideo*+bestaudio*/bestvideo+bestaudio`
+3. `best`
+
+Each failed attempt logs a warning and moves to the next expression. On total failure you'll be prompted to run `--list` and choose a format via `--fmt`.
+
+**Examples:**
+```sh
+# Show metadata only
+python cli.py youtube https://www.youtube.com/watch?v=ID
+
+# List formats
+python cli.py youtube https://www.youtube.com/watch?v=ID --list
+
+# Download best mp4 (auto fallback) to Desktop
+python cli.py youtube https://www.youtube.com/watch?v=ID -v
+
+# Download audio only as mp3 to a custom folder
+python cli.py youtube https://www.youtube.com/watch?v=ID -a --out ~/Media/audio
+
+# Download subtitles only (no media)
+python cli.py youtube https://www.youtube.com/watch?v=ID -s
+
+# Explicit format combine 1080p video (137) + opus audio (251)
+python cli.py youtube https://www.youtube.com/watch?v=ID --fmt 137+251 --out ./downloads
+
+# Constrain height (yt-dlp expression)
+python cli.py youtube https://www.youtube.com/watch?v=ID --fmt "bestvideo[height<=720]+bestaudio/best[height<=720]"
+```
+
+**Notes:**
+- Filenames are the video title; adjust or sanitize as needed manually for now.
+- Subtitles default language: English (`--subtitle` enables both manual + auto if available).
+- Use `--fmt` for full control; all yt-dlp format selectors are supported.
+- Output directory is echoed at start: `[info] Output directory: /path/...`
+- When all format attempts fail you will see a hint to run `--list`.
 
 ---
 
