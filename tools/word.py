@@ -178,7 +178,7 @@ def plot(
     csv_path: str = typer.Argument(..., help="Path to CSV file"),
     delimiter: Optional[str] = typer.Option(None, "-d", "--delimiter", help="CSV delimiter (auto if omitted)"),
     title: Optional[str] = typer.Option(None, "-t", "--title", help="Window title"),
-    save: bool = typer.Option(False, "-s", "--save", help="Also save a high-res PNG next to the CSV (same name, .png)"),
+    save: bool = typer.Option(False, "-s", "--save", help="Export a high-resolution PNG (layout rasterized via ImageExporter) and exit."),
     xcol: Optional[str] = typer.Option(None, "-x", "--xcol", help="Column (name or index) to use as X axis (time/index). Default: auto from first column"),
     ycols: Optional[str] = typer.Option(None, "-y", "--ycols", help="Comma-separated columns (names or indices) for Y subplots. Default: all numeric except xcol"),
     xlim: Optional[str] = typer.Option(None, "--xlim", help="Row index range start,end inclusive (e.g. 200,300)."),
@@ -202,6 +202,7 @@ def plot(
             raise typer.BadParameter(f"--xcol '{xcol}' not found")
 
     x_kind, xs, _ = _column_as_x(data.rows, x_index) if x_index >= 0 else ("row", [], "row")
+    total_original_points = len(xs)
 
     # Determine Y column indices
     if ycols:
@@ -237,8 +238,32 @@ def plot(
 
     print(f"[bold cyan]Loaded[/bold cyan] {len(data.rows)} rows, {len(data.headers)} columns from: {csv_path}")
     x_name = data.headers[x_index] if (0 <= x_index < len(data.headers)) else "row"
-    print(f"Using x-axis: {x_kind} (column: {x_name})")
-    print(f"Y subplots: {', '.join(name for _, name, _ in ycols_list)}")
+    if 0 <= x_index < len(data.headers):
+        print(f"Using x-axis: {x_kind} (column: {x_name}[{x_index}])")
+    else:
+        print(f"Using x-axis: {x_kind} (column: row index)")
+    # Derive available channel counts
+    total_cols = len(data.headers)
+    available_y_total = max(0, total_cols - (1 if x_index >= 0 else 0))
+    selected_y = len(ycols_list)
+    # Also compute how many of the available columns are numeric-eligible (auto detection) for context
+    auto_numeric_candidates = _collect_numeric_columns(data.headers, data.rows, skip_indices=[x_index])
+    numeric_candidate_count = len(auto_numeric_candidates)
+    # Detailed channel lists with indices
+    selected_pairs = [(idx, name) for idx, name, _ in ycols_list]
+    selected_display = [f"{name}[{idx}]" for idx, name in selected_pairs]
+    # Build full candidate list (excluding x)
+    all_candidate_indices = [i for i in range(total_cols) if i != x_index]
+    selected_indices_set = {idx for idx, _ in selected_pairs}
+    unselected_pairs = [(i, data.headers[i]) for i in all_candidate_indices if i not in selected_indices_set]
+    unselected_display = [f"{name}[{i}]" for i, name in unselected_pairs]
+    print(f"Y subplots: ({len(selected_pairs)} / {len(all_candidate_indices)})")
+    print(
+        f"Selected channels ({len(selected_display)}): " + (', '.join(selected_display) if selected_display else '(none)')
+    )
+    print(
+        f"Unselected channels ({len(unselected_display)}): " + (', '.join(unselected_display) if unselected_display else '(none)')
+    )
 
     # Range-based index trimming only
     total_points = len(xs)
@@ -267,7 +292,12 @@ def plot(
         for idx, name, arr in ycols_list:
             trimmed_y.append((idx, name, [arr[i] if i < len(arr) else math.nan for i in r_idx]))
         ycols_list = trimmed_y
-        print(f"Index trim -> kept indices [{imin},{imax}] ({len(xs)} points)")
+
+    # Report final number of x-axis data points (after any trimming)
+    if len(xs) == total_original_points:
+        print(f"Data points (x): {len(xs)} (full dataset)")
+    else:
+        print(f"Data points (x): [{imin},{imax}] ({len(xs)} / {total_original_points} points selected)")
 
     # Lazy import Qt/pyqtgraph only when plotting
     try:
@@ -297,6 +327,12 @@ def plot(
     except Exception:
         pass
 
+    # Tighten layout spacing (horizontal, vertical)
+    try:
+        win.ci.setSpacing(8, 3)
+    except Exception:
+        pass
+
     pen_colors = [
         (33, 150, 243),   # blue
         (244, 67, 54),    # red
@@ -307,27 +343,46 @@ def plot(
     ]
 
     first_plot = None
+    nplots = len(ycols_list)
     for i, (_idx, name, ys) in enumerate(ycols_list):
-        if x_kind == "time":
-            axis = DateAxisItem(orientation="bottom")
-            p = win.addPlot(row=i, col=0, axisItems={"bottom": axis})
-            p.setLabel("bottom", "Time")
+        is_last = (i == nplots - 1)
+        # Only give a DateAxisItem to the last plot if time-based
+        if x_kind == "time" and is_last:
+            axis_items = {"bottom": DateAxisItem(orientation="bottom")}
         else:
-            p = win.addPlot(row=i, col=0)
-            if x_kind == "index":
-                p.setLabel("bottom", x_name)
-            else:
-                p.setLabel("bottom", "Index")
+            axis_items = None
+        p = win.addPlot(row=i, col=0, axisItems=axis_items)
 
+        # Left label always shown
         p.setLabel("left", name)
-        p.showGrid(x=True, y=True, alpha=0.15)
-        # Force axis pen colors (avoid dark theme overrides)
-        for axis in ('left', 'bottom'):
+        p.showGrid(x=True, y=True, alpha=0.12)
+
+        # Axis styling
+        try:
+            p.getAxis('left').setPen('k'); p.getAxis('left').setTextPen('k')
+            p.getAxis('bottom').setPen('k'); p.getAxis('bottom').setTextPen('k')
+        except Exception:
+            pass
+
+        # Hide bottom axes for all but last to save vertical space
+        if not is_last:
             try:
-                p.getAxis(axis).setPen('k')
-                p.getAxis(axis).setTextPen('k')
+                p.getAxis('bottom').setStyle(showValues=False)
+                # Aggressively reduce height of hidden axis
+                if hasattr(p.getAxis('bottom'), 'setHeight'):
+                    p.getAxis('bottom').setHeight(2)
             except Exception:
                 pass
+        else:
+            # Last plot gets the X label
+            if x_kind == "time":
+                p.setLabel('bottom', 'Time')
+            elif x_kind == "index":
+                p.setLabel('bottom', x_name)
+            else:
+                p.setLabel('bottom', 'Index')
+
+        # Link X range
         if first_plot is not None:
             p.setXLink(first_plot)
 
@@ -342,21 +397,33 @@ def plot(
     app_qt.processEvents()
 
     if save:
+        # High-resolution export using ImageExporter (independent of on-screen window size)
         try:
             from pyqtgraph.exporters import ImageExporter  # type: ignore
-
-            # Export the entire layout at higher resolution
-            target_item = getattr(win, "ci", None) or first_plot
-            exporter = ImageExporter(target_item)
-            exporter.parameters()["width"] = 2400  # ~high-res width, aspect preserved
-
-            base, _ = os.path.splitext(os.path.expanduser(csv_path))
-            out_path = base + ".png"
-            exporter.export(out_path)
-            print(f"[green]Saved PNG[/green]: {out_path}")
         except Exception as e:
-            print(f"[red]Failed to export PNG[/red]: {e}")
-        return  # do not enter UI loop when saving only
+            print("[red]High-res export requires pyqtgraph.exporters (ensure pyqtgraph is up to date).[/red]")
+            raise typer.Exit(code=1) from e
+
+        win.show()
+        app_qt.processEvents()
+
+        target_item = getattr(win, 'ci', None) or first_plot
+        exporter = ImageExporter(target_item)
+        # Width heuristic; allow environment override
+        width = int(os.environ.get('WORD_EXPORT_WIDTH', '2400'))
+        per_plot_height = int(os.environ.get('WORD_EXPORT_PER_PLOT', '210'))
+        exporter.parameters()['width'] = width
+        exporter.parameters()['height'] = max(600, per_plot_height * nplots)
+
+        base, _ = os.path.splitext(os.path.expanduser(csv_path))
+        out_path = base + '.png'
+        try:
+            exporter.export(out_path)
+            print(f"[green]Saved high-res PNG[/green]: {out_path}  (width={width}px, plots={nplots})")
+        except Exception as e:
+            print(f"[red]Failed high-res export[/red]: {e}")
+            raise typer.Exit(code=1) from e
+        return
 
     # Interactive mode
     win.show()

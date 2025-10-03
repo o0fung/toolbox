@@ -280,7 +280,7 @@ lf word plot FILE [options]
 - `-x, --xcol NAME|INDEX`: Column to use as X axis (time-like, numeric, or fallback to row indices). Default: first column.
 - `-y, --ycols COLS`: Comma-separated list of Y columns (names or indices). Default: all numeric except the chosen x column.
 - `--xlim start,end`: Row index slice (inclusive) before plotting. Accepts comma or colon: `--xlim 200,300` or `--xlim 200:300`. Empty start/end allowed (`,500` or `500,`).
-- `-s, --save`: Export a high‑resolution PNG (no interactive window) next to the CSV (same basename).
+- `-s, --save`: Export a high‑resolution PNG (ImageExporter; independent of window size) next to the CSV (same basename) and exit. Env overrides: `WORD_EXPORT_WIDTH`, `WORD_EXPORT_PER_PLOT`.
 
 **Automatic X-axis detection:**
 1. If selected x column parses as (mostly) datetimes or epoch seconds/milliseconds -> time axis (DateAxisItem).
@@ -314,15 +314,34 @@ lf word plot data.csv -x timestamp -y temperature,pressure,3
 # Restrict to row indices 200..300
 lf word plot data.csv --xlim 200,300
 
-# Export a PNG (no GUI)
+# Export a high-res PNG (no GUI)
 lf word plot data.csv -y acc_x,acc_y,acc_z -s
+
+# Custom export size via environment
+WORD_EXPORT_WIDTH=3000 WORD_EXPORT_PER_PLOT=250 lf word plot data.csv -s
 ```
+
+**Console Output Summary:** (example)
+```text
+Loaded 6000 rows, 18 columns from: data.csv
+Using x-axis: index (column: time[0])
+Y subplots: (6 / 17)
+Selected channels (6): acc_x[3], acc_y[4], acc_z[5], gyr_x[6], gyr_y[7], gyr_z[8]
+Unselected channels (11): temp[9], pressure[10], battery[11], state[12], ...
+Index trim -> kept indices [1000,1500] (501 points)
+Data points (x): [1000,1500] (501 / 6000 points selected)
+Saved high-res PNG: data.png (width=2400px, plots=6)
+```
+Notes:
+- Channel indices in brackets are zero-based column positions from the original CSV.
+- Unselected list excludes the chosen x-axis column.
+- When no trimming is applied you will see `(full dataset)` instead of a selected fraction.
 
 **Requirements:**
 - Desktop GUI environment (macOS, Windows, Linux with X11/Wayland).
 - Dependencies: `PyQt6`, `pyqtgraph` (plus optional `python-dateutil` for richer date parsing).
 
-**Planned (possible future additions):** range export (`--export`), interactive ROI selection, overlay/legend mode.
+**Planned (possible future additions):** trimmed-segment CSV export, interactive ROI selection, overlay/legend mode, optional high‑resolution (scaled) exporter.
 
 ---
 
@@ -335,6 +354,7 @@ tools/
   youtube.py         # YouTube downloader tool
   clock.py           # Full-screen seven-segment terminal clock
 	cheque.py          # HK cheque wording (Chinese + English)
+	word.py            # CSV plotting with pyqtgraph (PyQt6)
 	word.py            # CSV plotting with pyqtgraph (PyQt6)
 ```
 
