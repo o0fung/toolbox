@@ -262,39 +262,67 @@ Notes:
 
 ## 🚩 word
 
-Plot CSV columns in a PyQt6/pyqtgraph window. The first column is used as the X-axis if it is time-like (timestamps or parseable datetimes) or numeric index-like; otherwise, row index is used. Every other column that’s mostly numeric becomes a subplot.
+Plot CSV columns in stacked subplots using PyQt6 + pyqtgraph (professional white theme). Flexible column selection and index range trimming.
 
 **Usage:**
 ```sh
 # From the repo
-python cli.py word plot FILE [--delimiter DELIM] [--title TITLE]
+python cli.py word plot FILE [options]
 
 # Installed entrypoint
-lf word plot FILE [--delimiter DELIM] [--title TITLE]
+lf word plot FILE [options]
 ```
 
-Options:
+**Key Options:**
 - `FILE` (required): CSV/TSV file path.
-- `-d, --delimiter`: CSV delimiter. If omitted, it’s auto-detected (commas, tabs, semicolons, pipes, space).
-- `-t, --title`: Window title.
+- `-d, --delimiter DELIM`: Force delimiter (auto-sniff if omitted across , \t ; | space).
+- `-t, --title TEXT`: Window title.
+- `-x, --xcol NAME|INDEX`: Column to use as X axis (time-like, numeric, or fallback to row indices). Default: first column.
+- `-y, --ycols COLS`: Comma-separated list of Y columns (names or indices). Default: all numeric except the chosen x column.
+- `--xlim start,end`: Row index slice (inclusive) before plotting. Accepts comma or colon: `--xlim 200,300` or `--xlim 200:300`. Empty start/end allowed (`,500` or `500,`).
+- `-s, --save`: Export a high‑resolution PNG (no interactive window) next to the CSV (same basename).
 
-Behavior:
-- X-axis detection:
-	- Time-like: ISO-ish strings or values parseable by python-dateutil (if installed); numeric epochs in seconds (>1e9) or milliseconds (>1e12).
-	- Index-like: numeric first column.
-	- Otherwise: row index 0..N-1.
-- Y-columns: columns with at least ~60% numeric values are treated as “data-like” and each gets its own subplot. Non-numeric/missing values become gaps.
-- Time X-axis uses pyqtgraph’s `DateAxisItem`.
+**Automatic X-axis detection:**
+1. If selected x column parses as (mostly) datetimes or epoch seconds/milliseconds -> time axis (DateAxisItem).
+2. Else if (mostly) numeric -> numeric index using the column’s values.
+3. Else -> simple row index (0..N-1).
 
-Examples:
+**Y column selection:**
+- Columns with ≥ ~60% numeric entries qualify automatically (unless overridden with `--ycols`).
+- Non-numeric cells become gaps (NaN) in the plot.
+
+**Index trimming (`--xlim`):**
+- Applied to row indices, not data values or timestamps.
+- Example: `--xlim 1000,2000` keeps only rows 1000–2000 inclusive.
+- `--xlim ,500` keeps start through 500; `--xlim 500,` keeps 500 through end.
+
+**White Theme:**
+- Background forced to white; axes/text black; subtle grid (alpha 0.15).
+- Exported PNG uses the same theme.
+
+**Examples:**
 ```sh
+# Quick auto plot
 lf word plot ~/data/sensors.csv
+
+# Tab-delimited with custom title
 lf word plot ~/data/log.tsv -d $'\t' -t "Device Log"
+
+# Explicit x column by name and selected y columns
+lf word plot data.csv -x timestamp -y temperature,pressure,3
+
+# Restrict to row indices 200..300
+lf word plot data.csv --xlim 200,300
+
+# Export a PNG (no GUI)
+lf word plot data.csv -y acc_x,acc_y,acc_z -s
 ```
 
-Requirements:
-- GUI environment (macOS, Windows, or X11/Wayland Linux desktop).
-- Python packages are installed automatically via requirements: `PyQt6`, `pyqtgraph`. For broader date parsing, you can `pip install python-dateutil` (optional).
+**Requirements:**
+- Desktop GUI environment (macOS, Windows, Linux with X11/Wayland).
+- Dependencies: `PyQt6`, `pyqtgraph` (plus optional `python-dateutil` for richer date parsing).
+
+**Planned (possible future additions):** range export (`--export`), interactive ROI selection, overlay/legend mode.
 
 ---
 

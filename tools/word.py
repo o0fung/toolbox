@@ -3,7 +3,7 @@ import math
 import os
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Iterable
 
 import typer
 from rich import print
@@ -117,46 +117,59 @@ def _try_parse_datetime(s: str) -> Optional[datetime]:
     return None
 
 
-def _first_col_as_x(rows: List[List[str]]) -> Tuple[str, List[float], str]:
-    """
-    Decide x-axis from first column if time-like or index-like numeric.
+def _column_as_x(rows: List[List[str]], col_index: int) -> Tuple[str, List[float], str]:
+    """Decide x-axis nature from an arbitrary column index.
+
     Returns (x_kind, x_values, x_label) where x_kind in {"time", "index", "row"}.
-    - time: epoch seconds list for DateAxisItem
-    - index: numeric values from first column
-    - row: 0..N-1
+    - time: epoch seconds list (float) suitable for DateAxisItem
+    - index: numeric values
+    - row: fallback row indices 0..N-1 (column unsuitable)
     """
-    if not rows or not rows[0]:
-        return "row", list(range(len(rows))), "row"
+    if not rows:
+        return "row", [], "row"
 
-    first_col = [r[0] if len(r) > 0 else "" for r in rows]
+    col_vals = [r[col_index] if len(r) > col_index else "" for r in rows]
 
-    # Try datetime
-    parsed_dt: List[Optional[datetime]] = [_try_parse_datetime(s) for s in first_col]
+    parsed_dt: List[Optional[datetime]] = [_try_parse_datetime(s) for s in col_vals]
     dt_ok = sum(1 for d in parsed_dt if d is not None)
-    if dt_ok >= max(3, int(0.8 * len(first_col))):
+    if dt_ok >= max(3, int(0.8 * len(col_vals))):
         xs = [d.timestamp() if d is not None else math.nan for d in parsed_dt]
         return "time", xs, "time"
 
-    # Try numeric index-like
-    xs_num, ok = _to_float_list(first_col)
-    if ok >= max(3, int(0.8 * len(first_col))):
+    xs_num, ok = _to_float_list(col_vals)
+    if ok >= max(3, int(0.8 * len(col_vals))):
         return "index", xs_num, "index"
 
-    # Fallback: row index
     return "row", list(range(len(rows))), "row"
 
 
-def _collect_numeric_columns(headers: List[str], rows: List[List[str]]) -> List[Tuple[str, List[float]]]:
-    cols: List[Tuple[str, List[float]]] = []
+def _collect_numeric_columns(headers: List[str], rows: List[List[str]], skip_indices: Iterable[int]) -> List[Tuple[int, str, List[float]]]:
+    cols: List[Tuple[int, str, List[float]]] = []
     ncols = max(len(r) for r in rows) if rows else 0
-    for j in range(1, ncols):  # skip first column; used as x if suitable
+    skips = set(skip_indices)
+    for j in range(ncols):
+        if j in skips:
+            continue
         col_vals = [r[j] if len(r) > j else "" for r in rows]
         floats, ok = _to_float_list(col_vals)
-        # Consider column as data-like if at least 60% numeric
-        if ok >= max(2, int(0.6 * len(col_vals))):
+        if ok >= max(2, int(0.6 * len(col_vals))):  # threshold heuristic
             name = headers[j] if j < len(headers) else f"col{j}"
-            cols.append((name, floats))
+            cols.append((j, name, floats))
     return cols
+
+
+def _resolve_col_token(token: str, headers: List[str]) -> Optional[int]:
+    token = token.strip()
+    if token == "":
+        return None
+    if token.isdigit():
+        return int(token)
+    # Case-insensitive exact match
+    lowered = [h.lower() for h in headers]
+    try:
+        return lowered.index(token.lower())
+    except ValueError:
+        return None
 
 
 # Main CLI entry point
@@ -166,6 +179,9 @@ def plot(
     delimiter: Optional[str] = typer.Option(None, "-d", "--delimiter", help="CSV delimiter (auto if omitted)"),
     title: Optional[str] = typer.Option(None, "-t", "--title", help="Window title"),
     save: bool = typer.Option(False, "-s", "--save", help="Also save a high-res PNG next to the CSV (same name, .png)"),
+    xcol: Optional[str] = typer.Option(None, "-x", "--xcol", help="Column (name or index) to use as X axis (time/index). Default: auto from first column"),
+    ycols: Optional[str] = typer.Option(None, "-y", "--ycols", help="Comma-separated columns (names or indices) for Y subplots. Default: all numeric except xcol"),
+    xlim: Optional[str] = typer.Option(None, "--xlim", help="Row index range start,end inclusive (e.g. 200,300)."),
 ):
     """Plot CSV columns using pyqtgraph with subplots per data column.
 
@@ -175,15 +191,83 @@ def plot(
     - Time x-axis uses a DateAxisItem.
     """
     data = _read_csv(csv_path, delimiter)
-    x_kind, xs, x_label = _first_col_as_x(data.rows)
-    ycols = _collect_numeric_columns(data.headers, data.rows)
+    ncols = max(len(r) for r in data.rows) if data.rows else 0
 
-    if not ycols:
-        raise typer.BadParameter("No numeric columns to plot (besides the first column)")
+    # Resolve x column index
+    if xcol is None:
+        x_index = 0 if ncols > 0 else -1
+    else:
+        x_index = _resolve_col_token(xcol, data.headers)
+        if x_index is None or x_index < 0 or x_index >= ncols:
+            raise typer.BadParameter(f"--xcol '{xcol}' not found")
+
+    x_kind, xs, _ = _column_as_x(data.rows, x_index) if x_index >= 0 else ("row", [], "row")
+
+    # Determine Y column indices
+    if ycols:
+        chosen_indices: List[int] = []
+        for tok in ycols.split(','):
+            idx = _resolve_col_token(tok, data.headers)
+            if idx is None:
+                print(f"[yellow]Warning[/yellow]: y column token '{tok.strip()}' not found; skipping")
+                continue
+            if idx == x_index:
+                print(f"[yellow]Warning[/yellow]: y column token '{tok.strip()}' is xcol; skipping")
+                continue
+            if idx < 0 or idx >= ncols:
+                print(f"[yellow]Warning[/yellow]: y column index {idx} out of range; skipping")
+                continue
+            if idx not in chosen_indices:
+                chosen_indices.append(idx)
+        # Build y list (include even if low numeric content but warn)
+        ycols_list: List[Tuple[int, str, List[float]]] = []
+        for idx in chosen_indices:
+            vals = [r[idx] if len(r) > idx else "" for r in data.rows]
+            floats, ok = _to_float_list(vals)
+            name = data.headers[idx] if idx < len(data.headers) else f"col{idx}"
+            if ok == 0:
+                print(f"[yellow]Warning[/yellow]: column '{name}' has no numeric data; will appear empty")
+            ycols_list.append((idx, name, floats))
+    else:
+        # Auto collect numeric except x
+        ycols_list = _collect_numeric_columns(data.headers, data.rows, skip_indices=[x_index])
+
+    if not ycols_list:
+        raise typer.BadParameter("No Y columns to plot")
 
     print(f"[bold cyan]Loaded[/bold cyan] {len(data.rows)} rows, {len(data.headers)} columns from: {csv_path}")
-    print(f"Using x-axis: {x_kind}")
-    print(f"Y subplots: {', '.join(name for name, _ in ycols)}")
+    x_name = data.headers[x_index] if (0 <= x_index < len(data.headers)) else "row"
+    print(f"Using x-axis: {x_kind} (column: {x_name})")
+    print(f"Y subplots: {', '.join(name for _, name, _ in ycols_list)}")
+
+    # Range-based index trimming only
+    total_points = len(xs)
+    if xlim is not None:
+        raw = xlim.replace(' ', '')
+        sep = ',' if ',' in raw else (':' if ':' in raw else None)
+        if sep is None:
+            raise typer.BadParameter("--range must be in form start,end (comma or colon)")
+        parts = raw.split(sep)
+        if len(parts) != 2:
+            raise typer.BadParameter("--range expects exactly two numbers: start,end")
+        try:
+            imin = int(parts[0]) if parts[0] != '' else 0
+            imax = int(parts[1]) if parts[1] != '' else total_points - 1
+        except ValueError:
+            raise typer.BadParameter("--range values must be integers")
+        if imin < 0:
+            imin = 0
+        if imax >= total_points:
+            imax = total_points - 1
+        if imin > imax:
+            raise typer.BadParameter("Index trim invalid: start > end")
+        r_idx = range(imin, imax + 1)
+        xs = [xs[i] for i in r_idx]
+        trimmed_y: List[Tuple[int, str, List[float]]] = []
+        for idx, name, arr in ycols_list:
+            trimmed_y.append((idx, name, [arr[i] if i < len(arr) else math.nan for i in r_idx]))
+        ycols_list = trimmed_y
+        print(f"Index trim -> kept indices [{imin},{imax}] ({len(xs)} points)")
 
     # Lazy import Qt/pyqtgraph only when plotting
     try:
@@ -197,31 +281,53 @@ def plot(
 
     app_qt = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
+    # Apply white theme BEFORE creating widgets to override defaults / dark mode
+    pg.setConfigOption('background', (255, 255, 255))
+    pg.setConfigOption('foreground', (0, 0, 0))
+
     win = pg.GraphicsLayoutWidget()
     win.setWindowTitle(title or f"CSV Plot - {os.path.basename(csv_path)}")
     win.resize(1000, 800)
 
+    # Extra safety: enforce palette on window (in some dark system themes)
+    try:
+        pal = win.palette()
+        pal.setColor(pal.ColorRole.Window, QtWidgets.QColor(255, 255, 255))
+        win.setPalette(pal)
+    except Exception:
+        pass
+
     pen_colors = [
-        (0, 170, 255),  # cyan
-        (255, 120, 0),  # orange
-        (50, 220, 50),  # green
-        (200, 100, 255),  # purple
-        (240, 240, 0),  # yellow
-        (255, 80, 80),  # red
+        (33, 150, 243),   # blue
+        (244, 67, 54),    # red
+        (76, 175, 80),    # green
+        (255, 152, 0),    # orange
+        (156, 39, 176),   # purple
+        (0, 121, 107),    # teal
     ]
 
     first_plot = None
-    for i, (name, ys) in enumerate(ycols):
+    for i, (_idx, name, ys) in enumerate(ycols_list):
         if x_kind == "time":
             axis = DateAxisItem(orientation="bottom")
             p = win.addPlot(row=i, col=0, axisItems={"bottom": axis})
             p.setLabel("bottom", "Time")
         else:
             p = win.addPlot(row=i, col=0)
-            p.setLabel("bottom", "Index" if x_kind != "index" else (data.headers[0] if data.headers else "index"))
+            if x_kind == "index":
+                p.setLabel("bottom", x_name)
+            else:
+                p.setLabel("bottom", "Index")
 
         p.setLabel("left", name)
-        p.showGrid(x=True, y=True, alpha=0.3)
+        p.showGrid(x=True, y=True, alpha=0.15)
+        # Force axis pen colors (avoid dark theme overrides)
+        for axis in ('left', 'bottom'):
+            try:
+                p.getAxis(axis).setPen('k')
+                p.getAxis(axis).setTextPen('k')
+            except Exception:
+                pass
         if first_plot is not None:
             p.setXLink(first_plot)
 
