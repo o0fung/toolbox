@@ -282,6 +282,7 @@ lf word plot FILE [options]
 - `--xlim start,end`: Row index slice (inclusive) before plotting. Accepts comma or colon: `--xlim 200,300` or `--xlim 200:300`. Empty start/end allowed (`,500` or `500,`).
 - `-s, --save`: Export a high‑resolution PNG (ImageExporter; independent of window size) next to the CSV (same basename) and exit. Env overrides: `WORD_EXPORT_WIDTH`, `WORD_EXPORT_PER_PLOT`.
 - `-w, --weight FLOAT`: Line width (in pixels) for all plotted lines (default 1.0). Increase (e.g. 2 or 3) to make thin signals more visible.
+ - `-o, --out-path PATH`: Output PNG path or directory (implies `--save` if not explicitly provided). If a directory or ends with a path separator, the file name `<csv_basename>.png` is used. `.png` extension appended if missing.
 
 **Automatic X-axis detection:**
 1. If selected x column parses as (mostly) datetimes or epoch seconds/milliseconds -> time axis (DateAxisItem).
@@ -318,6 +319,9 @@ lf word plot data.csv --xlim 200,300
 # Export a high-res PNG (no GUI)
 lf word plot data.csv -y acc_x,acc_y,acc_z -s
 
+# Export to a specific file path (auto-enables save mode)
+lf word plot data.csv -o ~/Desktop/plots/session1.png
+
 # Custom export size via environment
 WORD_EXPORT_WIDTH=3000 WORD_EXPORT_PER_PLOT=250 lf word plot data.csv -s
 
@@ -345,21 +349,27 @@ Notes:
 - Desktop GUI environment (macOS, Windows, Linux with X11/Wayland).
 - Dependencies: `PyQt6`, `pyqtgraph` (plus optional `python-dateutil` for richer date parsing).
 
-**Planned (possible future additions):** trimmed-segment CSV export, interactive ROI selection, overlay/legend mode, optional high‑resolution (scaled) exporter.
+**Keyboard Shortcuts (interactive mode):**
+- `Esc`: Close the window and exit.
+
+**Other Behaviors:**
+- Supplying `--out-path` without `--save` prints a note and performs a save (no interactive session).
+- Rows with non-numeric Y values render gaps (NaN) in lines instead of aborting.
+
+**Planned (possible future additions):** trimmed-segment CSV export, interactive ROI selection, overlay/legend mode, optional scaled vector/SVG export.
 
 ---
 
 ## Project Structure
 
 ```
-cli.py               # Main CLI entry point
+cli.py          # Main CLI entry point
 tools/
-  tree.py            # Directory tree tool
-  youtube.py         # YouTube downloader tool
-  clock.py           # Full-screen seven-segment terminal clock
-	cheque.py          # HK cheque wording (Chinese + English)
-	word.py            # CSV plotting with pyqtgraph (PyQt6)
-	word.py            # CSV plotting with pyqtgraph (PyQt6)
+	tree.py       # Directory tree tool
+	youtube.py    # YouTube downloader tool
+	clock.py      # Full-screen seven-segment terminal clock
+	cheque.py     # HK cheque wording (Chinese + English)
+	word.py       # CSV plotting with pyqtgraph (PyQt6)
 ```
 
 ## License

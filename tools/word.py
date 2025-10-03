@@ -179,6 +179,12 @@ def plot(
     delimiter: Optional[str] = typer.Option(None, "-d", "--delimiter", help="CSV delimiter (auto if omitted)"),
     title: Optional[str] = typer.Option(None, "-t", "--title", help="Window title"),
     save: bool = typer.Option(False, "-s", "--save", help="Export a high-resolution PNG (ImageExporter) and exit."),
+    out_path: Optional[str] = typer.Option(
+        None,
+        "-o",
+        "--out-path",
+        help="Output PNG file path or directory when using --save. If a directory or ends with a path separator, the file name <csv_basename>.png is used. Extension .png will be appended if missing. Providing this flag implies --save if not explicitly set.",
+    ),
     xcol: Optional[str] = typer.Option(None, "-x", "--xcol", help="Column (name or index) to use as X axis (time/index). Default: auto from first column"),
     ycols: Optional[str] = typer.Option(None, "-y", "--ycols", help="Comma-separated columns (names or indices) for Y subplots. Default: all numeric except xcol"),
     xlim: Optional[str] = typer.Option(None, "--xlim", help="Row index range start,end inclusive (e.g. 200,300)."),
@@ -388,12 +394,43 @@ def plot(
     # Ensure layouts are finalized before exporting or showing
     app_qt.processEvents()
 
+    # If user supplied an out_path but did not pass --save, assume they intended to save.
+    if (out_path is not None) and (not save):
+        print("[yellow]Note[/yellow]: --out-path provided without --save; enabling save mode.")
+        save = True  # type: ignore
+
     if save:
         # Always perform high-resolution export using ImageExporter
         win.show()
         app_qt.processEvents()
         base, _ = os.path.splitext(os.path.expanduser(csv_path))
-        out_path = base + ".png"
+
+        # Resolve output path behavior:
+        # 1. If user provided out_path treat it as either a directory or file path.
+        # 2. If directory (exists or endswith path sep) -> join with <csv_basename>.png
+        # 3. If extension missing add .png
+        # 4. If not provided default to <csv_file_basename>.png next to CSV.
+        if out_path is None:
+            resolved_out = base + ".png"
+        else:
+            candidate = os.path.expanduser(out_path)
+            # If ends with separator or is an existing directory treat as directory
+            if candidate.endswith(os.sep) or os.path.isdir(candidate):
+                os.makedirs(candidate, exist_ok=True)
+                resolved_out = os.path.join(candidate, os.path.basename(base) + ".png")
+            else:
+                parent = os.path.dirname(candidate) or "."
+                if not os.path.isdir(parent):
+                    try:
+                        os.makedirs(parent, exist_ok=True)
+                    except Exception as e:
+                        raise typer.BadParameter(f"Cannot create parent directory for out-path: {parent}: {e}") from e
+                root, ext = os.path.splitext(candidate)
+                if ext.lower() != ".png":
+                    resolved_out = candidate + ".png"
+                else:
+                    resolved_out = candidate
+        out_path = resolved_out
         try:
             from pyqtgraph.exporters import ImageExporter  # type: ignore
         except Exception as e:
@@ -422,7 +459,17 @@ def plot(
         return
 
     # Interactive mode
+    # Add an ESC key shortcut so user can quickly close the window
+    try:  # Guard in case QtGui not available for some reason
+        from PyQt6 import QtGui, QtCore  # type: ignore
+        esc_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Escape"), win)
+        esc_shortcut.setContext(QtCore.Qt.ShortcutContext.WindowShortcut)
+        esc_shortcut.activated.connect(win.close)  # type: ignore[arg-type]
+    except Exception:
+        pass
+
     win.show()
+    print("[dim]Press ESC to close the window.[/dim]")
     app_qt.exec()
 
 
