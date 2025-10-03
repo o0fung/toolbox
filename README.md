@@ -281,6 +281,7 @@ lf word plot FILE [options]
 - `-y, --ycols COLS`: Comma-separated list of Y columns (names or indices). Default: all numeric except the chosen x column.
 - `--xlim start,end`: Row index slice (inclusive) before plotting. Accepts comma or colon: `--xlim 200,300` or `--xlim 200:300`. Empty start/end allowed (`,500` or `500,`).
 - `-s, --save`: Export a high‑resolution PNG (ImageExporter; independent of window size) next to the CSV (same basename) and exit. Env overrides: `WORD_EXPORT_WIDTH`, `WORD_EXPORT_PER_PLOT`.
+- `-w, --weight FLOAT`: Line width (in pixels) for all plotted lines (default 1.0). Increase (e.g. 2 or 3) to make thin signals more visible.
 
 **Automatic X-axis detection:**
 1. If selected x column parses as (mostly) datetimes or epoch seconds/milliseconds -> time axis (DateAxisItem).
@@ -319,6 +320,9 @@ lf word plot data.csv -y acc_x,acc_y,acc_z -s
 
 # Custom export size via environment
 WORD_EXPORT_WIDTH=3000 WORD_EXPORT_PER_PLOT=250 lf word plot data.csv -s
+
+# Thicker lines for visibility
+lf word plot data.csv -y acc_x,acc_y,acc_z -w 2.5
 ```
 
 **Console Output Summary:** (example)
@@ -330,7 +334,7 @@ Selected channels (6): acc_x[3], acc_y[4], acc_z[5], gyr_x[6], gyr_y[7], gyr_z[8
 Unselected channels (11): temp[9], pressure[10], battery[11], state[12], ...
 Index trim -> kept indices [1000,1500] (501 points)
 Data points (x): [1000,1500] (501 / 6000 points selected)
-Saved high-res PNG: data.png (width=2400px, plots=6)
+Saved PNG: data.png (width=2400px, plots=6, line-width=2.5)
 ```
 Notes:
 - Channel indices in brackets are zero-based column positions from the original CSV.
