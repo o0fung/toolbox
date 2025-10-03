@@ -178,7 +178,8 @@ def plot(
     csv_path: str = typer.Argument(..., help="Path to CSV file"),
     delimiter: Optional[str] = typer.Option(None, "-d", "--delimiter", help="CSV delimiter (auto if omitted)"),
     title: Optional[str] = typer.Option(None, "-t", "--title", help="Window title"),
-    save: bool = typer.Option(False, "-s", "--save", help="Export a high-resolution PNG (layout rasterized via ImageExporter) and exit."),
+    save: bool = typer.Option(False, "-s", "--save", help="Export a PNG and exit (use --save-mode to control resolution)."),
+    save_mode: str = typer.Option("high", "--save-mode", help="PNG resolution mode: 'high' (ImageExporter, scalable) or 'low' (window snapshot)", show_default=True),
     xcol: Optional[str] = typer.Option(None, "-x", "--xcol", help="Column (name or index) to use as X axis (time/index). Default: auto from first column"),
     ycols: Optional[str] = typer.Option(None, "-y", "--ycols", help="Comma-separated columns (names or indices) for Y subplots. Default: all numeric except xcol"),
     xlim: Optional[str] = typer.Option(None, "--xlim", help="Row index range start,end inclusive (e.g. 200,300)."),
@@ -397,6 +398,27 @@ def plot(
     app_qt.processEvents()
 
     if save:
+        mode = save_mode.lower().strip()
+        if mode not in {"high", "low"}:
+            print(f"[red]Invalid --save-mode '{save_mode}'. Use 'high' or 'low'.[/red]")
+            raise typer.Exit(code=1)
+
+        win.show()
+        app_qt.processEvents()
+        base, _ = os.path.splitext(os.path.expanduser(csv_path))
+        out_path = base + ("_low.png" if mode == "low" else ".png")
+
+        if mode == "low":
+            # Pixel-perfect snapshot of current window size
+            try:
+                pm = win.grab()
+                pm.save(out_path, 'PNG')
+                print(f"[green]Saved low-res PNG[/green]: {out_path} (window-size snapshot)")
+            except Exception as e:
+                print(f"[red]Failed low-res export[/red]: {e}")
+                raise typer.Exit(code=1) from e
+            return
+
         # High-resolution export using ImageExporter (independent of on-screen window size)
         try:
             from pyqtgraph.exporters import ImageExporter  # type: ignore
@@ -404,22 +426,15 @@ def plot(
             print("[red]High-res export requires pyqtgraph.exporters (ensure pyqtgraph is up to date).[/red]")
             raise typer.Exit(code=1) from e
 
-        win.show()
-        app_qt.processEvents()
-
         target_item = getattr(win, 'ci', None) or first_plot
         exporter = ImageExporter(target_item)
-        # Width heuristic; allow environment override
         width = int(os.environ.get('WORD_EXPORT_WIDTH', '2400'))
         per_plot_height = int(os.environ.get('WORD_EXPORT_PER_PLOT', '210'))
         exporter.parameters()['width'] = width
         exporter.parameters()['height'] = max(600, per_plot_height * nplots)
-
-        base, _ = os.path.splitext(os.path.expanduser(csv_path))
-        out_path = base + '.png'
         try:
             exporter.export(out_path)
-            print(f"[green]Saved high-res PNG[/green]: {out_path}  (width={width}px, plots={nplots})")
+            print(f"[green]Saved high-res PNG[/green]: {out_path} (width={width}px, plots={nplots})")
         except Exception as e:
             print(f"[red]Failed high-res export[/red]: {e}")
             raise typer.Exit(code=1) from e
