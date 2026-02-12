@@ -16,9 +16,12 @@ from rich.text import Text
 from rich.align import Align
 from rich.console import Console
 
+try:
+    from ._cli_common import new_typer_app
+except ImportError:  # pragma: no cover - direct script execution fallback
+    from tools._cli_common import new_typer_app
 
-# User can access help message with shortcut -h
-app = typer.Typer(context_settings={"help_option_names": ["-h", "--help"]})
+app = new_typer_app()
 console = Console()     # For getting console size
 
 
@@ -160,8 +163,8 @@ def _render_centered_text(text: str, color: str, size: str) -> Align:
     # Display target timestamp
     big = _render_big_time(
         text,
-    inner=preset["inner"],
-    vthick=preset["vthick"],
+        inner=preset["inner"],
+        vthick=preset["vthick"],
         gap=preset["gap"],
     )
 
@@ -349,5 +352,5 @@ def _render_big_time(timestr: str, inner: int = 6, vthick: int = 2, gap: int = 1
 
 
 # Entry point for manual execution: `python tools/clock.py`
-if __name__ == '__main__':
+if __name__ == "__main__":
     app()

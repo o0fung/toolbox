@@ -1,32 +1,119 @@
+from __future__ import annotations
+
+from decimal import Decimal, InvalidOperation
+
 import typer
 
+try:
+    from ._cli_common import new_typer_app
+except ImportError:  # pragma: no cover - direct script execution fallback
+    from tools._cli_common import new_typer_app
 
-# User can access help message with shortcut -h
-app = typer.Typer(context_settings={"help_option_names": ["-h", "--help"]})
+
+app = new_typer_app()
+
+# English helper currently supports up to trillion group (< 10^15)
+_MAX_DOLLARS = 10**15 - 1
+_CENT_SCALE = Decimal("0.01")
 
 
 @app.callback()
 def cheque(
-    value: int = typer.Argument(..., help="Amount in whole dollars (integer). Outputs HK cheque wording in Chinese and English."),
+    value: str = typer.Argument(
+        ...,
+        metavar="AMOUNT",
+        help="HKD amount (e.g. 123, 123.4, 123.45). Supports cents up to 2 decimal places.",
+    ),
 ):
-    """CLI: render a whole-dollar amount as HK cheque wording in Chinese & English.
+    """Render HK cheque wording in Traditional Chinese and English.
 
-    Contract:
-    - Input: non-negative integer (Hong Kong dollars, no cents).
-    - Output: two lines printed to stdout.
-        中文：港幣<大寫金額>元正
-        English: Hong Kong Dollars <words> only
-    - Error: negative input -> Typer BadParameter.
+    Input:
+    - Non-negative numeric amount in HKD with up to 2 decimal places.
+
+    Output:
+    - Chinese line: 中文：港幣<大寫金額>
+    - English line: English: Hong Kong Dollars <words> only
     """
-    if value < 0:
-        raise typer.BadParameter("Amount must be a non-negative integer")
+    dollars, cents = _parse_amount(value)
+    _ensure_supported_range(dollars)
 
-    # 0 is a valid amount on some forms; render explicitly
-    zh = _to_trad_chinese_upper(value)
-    en = _to_english_hk(value)
+    zh = _format_zh_amount(dollars, cents)
+    en = _format_en_amount(dollars, cents)
 
-    print(f"中文：港幣{zh}元正")
-    print(f"English: Hong Kong Dollars {en} only")
+    typer.echo(f"中文：港幣{zh}")
+    typer.echo(f"English: Hong Kong Dollars {en} only")
+
+
+def _parse_amount(raw: str) -> tuple[int, int]:
+    """Parse string amount into (dollars, cents) with 2dp validation."""
+    text = raw.strip().replace(",", "")
+    if not text:
+        raise typer.BadParameter("Amount is required")
+
+    try:
+        amount = Decimal(text)
+    except (InvalidOperation, ValueError) as exc:
+        raise typer.BadParameter("Amount must be a non-negative number, e.g. 123 or 123.45") from exc
+
+    if not amount.is_finite():
+        raise typer.BadParameter("Amount must be a finite number")
+    if amount < 0:
+        raise typer.BadParameter("Amount must be non-negative")
+
+    quantized = amount.quantize(_CENT_SCALE)
+    if amount != quantized:
+        raise typer.BadParameter("Amount can have at most 2 decimal places")
+
+    minor_units = int((quantized * 100).to_integral_value())
+    dollars, cents = divmod(minor_units, 100)
+    return dollars, cents
+
+
+def _ensure_supported_range(dollars: int) -> None:
+    """Validate scale limits supported by wording helpers."""
+    if dollars > _MAX_DOLLARS:
+        raise typer.BadParameter(
+            f"Amount too large. Maximum supported dollars is {_MAX_DOLLARS}."
+        )
+
+
+def _format_zh_amount(dollars: int, cents: int) -> str:
+    """Format full amount in Chinese cheque style."""
+    dollars_text = _to_trad_chinese_upper(dollars)
+    if cents == 0:
+        return f"{dollars_text}元正"
+    return f"{dollars_text}元{_to_zh_cents(cents)}"
+
+
+def _to_zh_cents(cents: int) -> str:
+    """Convert 0..99 cents to Chinese 角/分 wording."""
+    assert 0 <= cents < 100
+    if cents == 0:
+        return "正"
+
+    jiao, fen = divmod(cents, 10)
+    parts: list[str] = []
+
+    if jiao:
+        parts.append(_DIGITS_UPPER[jiao] + "角")
+    elif fen:
+        parts.append("零")
+
+    if fen:
+        parts.append(_DIGITS_UPPER[fen] + "分")
+
+    return "".join(parts)
+
+
+def _format_en_amount(dollars: int, cents: int) -> str:
+    """Format full amount in English cheque style."""
+    dollars_text = _to_english_hk(dollars)
+    if cents == 0:
+        return dollars_text
+
+    cents_text = _under_100_to_words(cents)
+    cents_unit = "cent" if cents == 1 else "cents"
+    return f"{dollars_text} and {cents_text} {cents_unit}"
 
 
 # --- Formatting helpers ----------------------------------------------------
@@ -97,6 +184,8 @@ def _to_trad_chinese_upper(n: int) -> str:
     while n > 0:
         groups.append(n % 10000)
         n //= 10000
+    if len(groups) > len(_GROUP_UNITS):
+        raise ValueError("Chinese wording scale exceeded")
 
     parts: list[str] = []
     zero_pending = False  # crossed one/more empty 10^4 groups since last non-zero
@@ -195,6 +284,8 @@ def _to_english_hk(n: int) -> str:
     while n > 0:
         groups.append(n % 1000)
         n //= 1000
+    if len(groups) > len(_SCALE_EN):
+        raise ValueError("English wording scale exceeded")
 
     words_parts: list[str] = []
     numeric_parts: list[int] = []
@@ -221,5 +312,5 @@ def _to_english_hk(n: int) -> str:
 
 
 # Entry point for running the script directly
-if __name__ == '__main__':
+if __name__ == "__main__":
     app()

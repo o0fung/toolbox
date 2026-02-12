@@ -1,191 +1,238 @@
-import typer
-import os
-import sys
+from __future__ import annotations
+
 import importlib
+import importlib.util
+import hashlib
 import shutil
+import sys
+from collections.abc import Callable
+from pathlib import Path
+from types import ModuleType
+from typing import cast
 
-from rich.tree import Tree      # for display tree directory
+import typer
 from rich import print
+from rich.tree import Tree
+
+try:
+    from ._cli_output import error, fatal, warn
+    from ._cli_common import new_typer_app
+except ImportError:  # pragma: no cover - direct script execution fallback
+    from tools._cli_output import error, fatal, warn
+    from tools._cli_common import new_typer_app
 
 
-# User can access help message with shortcut -h
-app = typer.Typer(context_settings={"help_option_names": ["-h", "--help"]})
+app = new_typer_app()
 
-# Main CLI entry point, allows invocation without subcommand (entry from go.py)
-@app.command('show')
+CallbackFn = Callable[[str], object]
+DEFAULT_WORK_MODULE = "_script"
+DEFAULT_WORK_FUNC = "_test"
+
+
+@app.command("show")
 def show(
-    path: str = typer.Argument(..., help='Root directory to display as a tree'),
-    depth: int = typer.Option(0, '-d', '--depth', help='Depth of the folder to display'),
-    skip: bool = typer.Option(False, '-s', '--skip-hidden', help='Skip hidden files and directories'),
+    path: str = typer.Argument(..., help="Root path (directory or file) to display as a tree"),
+    depth: int = typer.Option(0, "-d", "--depth", help="Depth to display (0 means unlimited)"),
+    skip: bool = typer.Option(False, "-s", "--skip-hidden", help="Skip hidden files and directories"),
 ):
-    """
-    Main entry point for the CLI. Builds and prints a directory tree for the given path.
-    Args:
-        path (str): The root directory to display as a tree.
-        depth (int): The maximum depth to display. 0 means unlimited.
-        skip (bool): If True, skip hidden files and directories.
-    """
-    # If no subcommand, require PATH
-    if not path:
-        raise typer.BadParameter("PATH is required when no subcommand is provided.")
+    """Display a directory/file tree."""
+    target = _resolve_existing_path(path)
+    _validate_depth(depth)
 
-    tree_obj = Tree(f"Directory: {path}")       # Create the root of the tree
-    _add_tree(tree_obj, path, depth, current_level=1, skip_hidden=skip)
-    print(tree_obj)                             # Print the tree using rich
-
-
-@app.command('work')
-def work(
-    path: str = typer.Argument(..., help='Root directory to display as a tree'),
-    depth: int = typer.Option(1, '-d', '--depth', help='Depth of the folder to display (default 1)'),
-    skip: bool = typer.Option(True, '-s', '--skip-hidden', help='Skip hidden files and directories (default True)'),
-    module: str = typer.Option('_script', '-m', '--module', help='Python script name (without .py) to import from the same folder'),
-    func: str = typer.Option('_test', '-f', '--func', help='Function name to import and execute from the script'),
-):
-    """
-    Display a tree like `show`, and for each file call the provided script function.
-    If the function returns a string, append the string to that file's label; if it returns None, append nothing.
-    The script module is searched/created next to the provided path.
-    """
-    # Validate and normalize path
-    path = os.path.expanduser(path)
-    if not os.path.exists(path):
-        typer.secho(f"Path does not exist: {path}", fg=typer.colors.RED)
-        raise typer.Exit(code=1)
-
-    # Determine the folder that contains the Python script to import
-    folder = path if os.path.isdir(path) else os.path.dirname(path)
-    
-    # Load the module from the target folder
-    callable_fn = _load_module(folder, module, func)
-
-    # Build and print the tree with callback to append statuses
-    tree_obj = Tree(f"Directory: {path}")
-    _add_tree(tree_obj, path, depth, current_level=1, skip_hidden=skip, callback=callable_fn)
+    tree_obj = _build_tree(
+        target=target,
+        max_depth=depth,
+        skip_hidden=skip,
+        callback=None,
+    )
     print(tree_obj)
 
 
-def _add_tree(tree, path, max_depth, current_level, skip_hidden=False, callback=None):
-    """
-    Recursively add files and folders to the tree up to max_depth.
-    If a callback is provided, it will be called for each file with the file's full path.
-    If the callback returns a string, that string is appended to the filename in the tree.
-    """
-    # Terminate the tree function when it reaches the max depth
-    if max_depth != 0 and current_level > max_depth:
+@app.command("work")
+def work(
+    path: str = typer.Argument(..., help="Target path (directory or file)"),
+    depth: int = typer.Option(1, "-d", "--depth", help="Depth to display/process (default: 1)"),
+    skip: bool = typer.Option(True, "-s", "--skip-hidden", help="Skip hidden files and directories (default: True)"),
+    module: str = typer.Option(DEFAULT_WORK_MODULE, "-m", "--module", help="Python module name (without .py) next to target path"),
+    func: str = typer.Option(DEFAULT_WORK_FUNC, "-f", "--func", help="Function name to call for each discovered file"),
+):
+    """Display a tree and invoke a callback function for each file."""
+    target = _resolve_existing_path(path)
+    _validate_depth(depth)
+
+    module_folder = target if target.is_dir() else target.parent
+    callback = _load_module(module_folder, module, func)
+
+    tree_obj = _build_tree(
+        target=target,
+        max_depth=depth,
+        skip_hidden=skip,
+        callback=callback,
+    )
+    print(tree_obj)
+
+
+def _resolve_existing_path(raw_path: str) -> Path:
+    expanded = Path(raw_path).expanduser()
+    if not expanded.exists():
+        raise typer.BadParameter(f"Path does not exist: {expanded}")
+    return expanded
+
+
+def _validate_depth(depth: int) -> None:
+    if depth < 0:
+        raise typer.BadParameter("Depth must be >= 0 (0 means unlimited).")
+
+
+def _build_tree(
+    target: Path,
+    max_depth: int,
+    skip_hidden: bool,
+    callback: CallbackFn | None,
+) -> Tree:
+    tree_obj = Tree(f"Directory: {target}")
+    if target.is_file():
+        _add_file_node(tree_obj, target, callback=callback)
+        return tree_obj
+
+    _add_tree(
+        tree=tree_obj,
+        directory=target,
+        max_depth=max_depth,
+        current_level=1,
+        skip_hidden=skip_hidden,
+        callback=callback,
+    )
+    return tree_obj
+
+
+def _add_tree(
+    tree: Tree,
+    directory: Path,
+    max_depth: int,
+    current_level: int,
+    skip_hidden: bool = False,
+    callback: CallbackFn | None = None,
+) -> None:
+    """Recursively add files and folders to the rendered tree."""
+    if max_depth and current_level > max_depth:
         return
 
     try:
-        path = os.path.expanduser(path)     # Parse the system user folder to path
-
-        for entry in os.listdir(path):
-
-            # Decide whether to work with the hidden/special files
-            if skip_hidden and (entry.startswith('.') or entry.startswith('_')):
-                continue
-
-            full_path = os.path.join(path, entry)       # Get the full path with entry filenames
-
-            if os.path.isdir(full_path):
-                # For directory folders, simply go inside and continue walk through the tree
-                branch = tree.add(f" [yellow]{entry}[yellow]")
-                _add_tree(branch, full_path, max_depth, current_level + 1, skip_hidden, callback)
-
-            else:
-                # For files, run the callback function if provided
-                # Append the suffix to the filename if callback return any string
-                suffix = ""
-                if callback is not None:
-                    try:
-                        result = callback(full_path)
-                        if isinstance(result, str) and result:
-                            suffix = result
-
-                    except Exception as e:
-                        # Ignore callback errors for tree display
-                        typer.secho(f"Callback error for '{full_path}': {e}", fg=typer.colors.RED)
-
-                tree.add(f" {entry}\t[green]{suffix}[green]")
-
+        entries = sorted(directory.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
     except PermissionError:
         tree.add("[red]Permission Denied[/red]")
+        return
+
+    for entry in entries:
+        if _should_skip(entry.name, skip_hidden=skip_hidden):
+            continue
+
+        if entry.is_dir():
+            branch = tree.add(f" [yellow]{entry.name}[/yellow]")
+            _add_tree(
+                tree=branch,
+                directory=entry,
+                max_depth=max_depth,
+                current_level=current_level + 1,
+                skip_hidden=skip_hidden,
+                callback=callback,
+            )
+            continue
+
+        _add_file_node(tree, entry, callback=callback)
 
 
-def _load_module(folder, module, func):
-    module_file = os.path.join(folder, f"{module}.py")
+def _should_skip(name: str, skip_hidden: bool) -> bool:
+    return skip_hidden and (name.startswith(".") or name.startswith("_"))
 
-    # Ensure the module file exists; copy template if available
-    if not os.path.isfile(module_file):
-        try:
-            # Copy template tools/_script.py into place when creating a new module file
-            template_path = os.path.join(os.path.dirname(__file__), '_script.py')
-            if os.path.isfile(template_path):
-                shutil.copyfile(template_path, module_file)
-                typer.secho(
-                    f"Created module from template: {module_file}",
-                    fg=typer.colors.YELLOW,
-                )
-            
-            else:
-                # Fallback: create an empty file if template is missing
-                # This only happen if the pip install has problem, because the _script.py is stored at site-packages
-                with open(module_file, 'w', encoding='utf-8') as f:
-                    f.write("")
-                typer.secho(
-                    f"Template not found. Created empty module file: {module_file}",
-                    fg=typer.colors.YELLOW,
-                )
-        
-        except Exception as e:
-            typer.secho(f"Failed to create module file '{module_file}': {e}", fg=typer.colors.RED)
-            raise typer.Exit(code=1)
 
-    # Import the module and function
+def _add_file_node(tree: Tree, file_path: Path, callback: CallbackFn | None) -> None:
+    suffix = _run_callback(callback, file_path)
+    if suffix:
+        tree.add(f" {file_path.name}\t[green]{suffix}[/green]")
+        return
+    tree.add(f" {file_path.name}")
+
+
+def _run_callback(callback: CallbackFn | None, file_path: Path) -> str:
+    if callback is None:
+        return ""
+
     try:
-        # Load the spec of module from specific file location
-        spec = importlib.util.spec_from_file_location(module, module_file)
-        if spec is None or spec.loader is None:
-            typer.secho("Failed to prepare import spec for module.", fg=typer.colors.RED)
-            raise typer.Exit(code=1)
+        result = callback(str(file_path))
+    except Exception as exc:  # pragma: no cover - user script runtime errors
+        warn(f"Callback error for '{file_path}': {exc}")
+        return ""
 
-        # Register temporarily so relative imports inside the module might work
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules[module] = mod
-        spec.loader.exec_module(mod)
+    return result if isinstance(result, str) else ""
 
-        # Make sure the function is available in the module file
-        if not hasattr(mod, func):
-            try:
-                # If no function in the module file, append an empty function stub to the module file
-                with open(module_file, 'a', encoding='utf-8') as f:
-                    f.write(f"def {func}(filepath: str):\n")
-                    f.write("    \"\"\"Auto-created stub. Return None.\"\"\"\n")
-                    f.write("    return\n")
 
-                typer.secho(
-                    f"Function '{func}' not found in module '{module}'. Created empty function stub.",
-                    fg=typer.colors.YELLOW,
-                )
-                importlib.invalidate_caches()
-                spec.loader.exec_module(mod)
+def _load_module(folder: Path, module: str, func: str) -> CallbackFn:
+    module_file = folder / f"{module}.py"
+    _ensure_module_file(module_file)
 
-            except Exception as e:
-                typer.secho(f"Failed to create function stub '{func}' in module '{module}': {e}", fg=typer.colors.RED)
-                raise typer.Exit(code=1)
-
-        # Make sure the function is callable
-        callable_fn = getattr(mod, func)
-        if not callable(callable_fn):
-            typer.secho(f"Attribute '{func}' in module '{module}' is not callable.", fg=typer.colors.RED)
-            raise typer.Exit(code=1)
-        
-        return callable_fn
-
+    try:
+        mod = _import_module(module_name=module, module_file=module_file)
     except Exception as exc:
-        typer.secho(f"Error loading module/function: {exc}", fg=typer.colors.RED)
-        raise typer.Exit(code=1)
+        fatal(f"Error loading module '{module_file}': {exc}")
+
+    if not hasattr(mod, func):
+        try:
+            _append_function_stub(module_file, func)
+            warn(f"Function '{func}' not found in module '{module}'. Created empty function stub.")
+            importlib.invalidate_caches()
+            mod = _import_module(module_name=module, module_file=module_file)
+        except Exception as exc:
+            error(
+                f"Failed to create function stub '{func}' in module '{module}': {exc}",
+            )
+            raise typer.Exit(code=1)
+
+    callable_fn = getattr(mod, func)
+    if not callable(callable_fn):
+        fatal(f"Attribute '{func}' in module '{module}' is not callable.")
+
+    return cast(CallbackFn, callable_fn)
 
 
-# Entry point for running the script directly
-if __name__ == '__main__':
+def _ensure_module_file(module_file: Path) -> None:
+    if module_file.is_file():
+        return
+
+    try:
+        template_path = Path(__file__).with_name("_script.py")
+        if template_path.is_file():
+            shutil.copyfile(template_path, module_file)
+            warn(f"Created module from template: {module_file}")
+            return
+
+        # Fallback if template is unavailable.
+        module_file.write_text("", encoding="utf-8")
+        warn(f"Template not found. Created empty module file: {module_file}")
+    except Exception as exc:
+        fatal(f"Failed to create module file '{module_file}': {exc}")
+
+
+def _append_function_stub(module_file: Path, func_name: str) -> None:
+    with module_file.open("a", encoding="utf-8") as handle:
+        handle.write(f"\n\ndef {func_name}(filepath: str):\n")
+        handle.write('    """Auto-created stub. Return None."""\n')
+        handle.write("    return\n")
+
+
+def _import_module(module_name: str, module_file: Path) -> ModuleType:
+    digest = hashlib.sha1(str(module_file.resolve()).encode("utf-8")).hexdigest()[:12]
+    module_key = f"_toolbox_tree_{module_name}_{digest}"
+    spec = importlib.util.spec_from_file_location(module_key, str(module_file))
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Failed to prepare import spec for module.")
+
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[module_key] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+if __name__ == "__main__":
     app()

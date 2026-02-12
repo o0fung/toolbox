@@ -8,8 +8,8 @@ A set of useful command-line tools for enhancing productivity.
 - **tree**: Display a directory tree with optional depth/hidden skipping, plus a flexible batch file processor that imports your function from a sibling Python file.
 - **youtube**: Download YouTube videos, audio, and subtitles, or display video metadata.
 - **clock**: Full-screen seven-segment terminal clock with stopwatch and countdown.
-- **cheque**: Convert integer amounts to formal HK cheque wording in Traditional Chinese and English.
-- **word**: Plot CSV data with pyqtgraph subplots; auto-detect time/index X-axis and plot all data-like columns.
+- **cheque**: Convert HKD amounts (supports cents) to formal HK cheque wording in Traditional Chinese and English.
+- **word**: Convert Markdown to DOCX (CloudConvert) and plot CSV data with pyqtgraph subplots.
 
 ## Installation
 
@@ -213,7 +213,7 @@ Notes:
 
 ## 🚩 cheque
 
-Render whole-dollar amounts as formal wording for Hong Kong cheques in both Traditional Chinese and English.
+Render HKD amounts (dollars + optional cents) as formal wording for Hong Kong cheques in both Traditional Chinese and English.
 
 Usage:
 ```sh
@@ -221,19 +221,23 @@ Usage:
 python cli.py cheque AMOUNT
 ```
 
-- `AMOUNT`: Non-negative integer, in Hong Kong dollars (no cents). Examples: `0`, `10`, `1234567`.
+- `AMOUNT`: Non-negative numeric amount with up to 2 decimal places. Examples: `0`, `10`, `1234567`, `123.45`, `0.05`.
 
 Output format:
-- Chinese: `中文：港幣<FINANCIAL_UPPERCASE>元正`
+- Chinese:
+	- cents is zero: `中文：港幣<FINANCIAL_UPPERCASE>元正`
+	- cents exists: `中文：港幣<FINANCIAL_UPPERCASE>元<角分>`
 - English: `English: Hong Kong Dollars <words> only`
 
 Rules implemented:
 - Chinese uses financial uppercase numerals (壹貳叁肆伍陸柒捌玖零) with units: 仟佰拾 within each group and 萬/億/兆 across groups.
 - Inserts a single `零` where a unit gap is present (e.g., 1001 -> 壹仟零壹；1000001 -> 壹佰萬零壹)。
+- Chinese cents are rendered with `角`/`分` (e.g., `0.05` -> `零伍分`).
 - English follows British/HK style:
 	- Uses "and" within hundreds (e.g., one hundred and two).
 	- Uses "and" between the last group (<100) and a higher group (e.g., one thousand and ten).
 	- Hyphenates 21–99 (e.g., twenty-one).
+	- Cents are rendered in words (e.g., `123.45` -> `... and forty-five cents only`).
 
 Examples:
 ```text
@@ -252,17 +256,47 @@ English: Hong Kong Dollars One million and one only
 python cli.py cheque 120034
 中文：港幣壹拾貳萬零叁拾肆元正
 English: Hong Kong Dollars One hundred and twenty thousand and thirty-four only
+
+python cli.py cheque 123.45
+中文：港幣壹佰貳拾叁元肆角伍分
+English: Hong Kong Dollars One hundred and twenty-three and forty-five cents only
+
+python cli.py cheque 0.05
+中文：港幣零元零伍分
+English: Hong Kong Dollars Zero and five cents only
 ```
 
 Notes:
 - Extend English scales beyond trillion by editing `tools/cheque.py` if needed.
-- If cents are required in the future, the helpers can be expanded to include sub-dollar parts.
 
 ---
 
 ## 🚩 word
 
-Plot CSV columns in stacked subplots using PyQt6 + pyqtgraph (professional white theme). Flexible column selection and index range trimming.
+`word` contains two subcommands:
+- `md`: convert one Markdown file to DOCX via CloudConvert.
+- `plot`: plot CSV columns in stacked subplots using PyQt6 + pyqtgraph.
+
+### Markdown to DOCX (`word md`)
+
+Usage:
+```sh
+# From the repo
+python cli.py word md notes.md --api-key "$CLOUDCONVERT_API_KEY"
+
+# Installed entrypoint
+lf word md notes.md --api-key "$CLOUDCONVERT_API_KEY"
+
+# Or rely on environment variable
+export CLOUDCONVERT_API_KEY="your_api_key_here"
+lf word md notes.md
+```
+
+Options:
+- `--api-key`: CloudConvert API key. If omitted, `CLOUDCONVERT_API_KEY` env var is used.
+- `--verbose/--quiet`: Toggle detailed conversion steps.
+
+### CSV plotting (`word plot`)
 
 **Usage:**
 ```sh
@@ -282,7 +316,7 @@ lf word plot FILE [options]
 - `--xlim start,end`: Row index slice (inclusive) before plotting. Accepts comma or colon: `--xlim 200,300` or `--xlim 200:300`. Empty start/end allowed (`,500` or `500,`).
 - `-s, --save`: Export a high‑resolution PNG (ImageExporter; independent of window size) next to the CSV (same basename) and exit. Env overrides: `WORD_EXPORT_WIDTH`, `WORD_EXPORT_PER_PLOT`.
 - `-w, --weight FLOAT`: Line width (in pixels) for all plotted lines (default 1.0). Increase (e.g. 2 or 3) to make thin signals more visible.
- - `-o, --out-path PATH`: Output PNG path or directory (implies `--save` if not explicitly provided). If a directory or ends with a path separator, the file name `<csv_basename>.png` is used. `.png` extension appended if missing.
+- `-o, --out-path PATH`: Output PNG path or directory (implies `--save` if not explicitly provided). If a directory or ends with a path separator, the file name `<csv_basename>.png` is used. `.png` extension appended if missing.
 
 **Automatic X-axis detection:**
 1. If selected x column parses as (mostly) datetimes or epoch seconds/milliseconds -> time axis (DateAxisItem).
@@ -365,11 +399,18 @@ Notes:
 ```
 cli.py          # Main CLI entry point
 tools/
+	_cli_common.py # Shared Typer app factory
+	_cli_output.py # Shared CLI output helpers
 	tree.py       # Directory tree tool
 	youtube.py    # YouTube downloader tool
 	clock.py      # Full-screen seven-segment terminal clock
 	cheque.py     # HK cheque wording (Chinese + English)
-	word.py       # CSV plotting with pyqtgraph (PyQt6)
+	word.py       # Word command group (registers subcommands)
+	word_md.py    # Markdown conversion (CloudConvert)
+	word_plot.py  # CSV plotting with pyqtgraph (PyQt6)
+tests/
+	test_cheque.py
+	test_tree.py
 ```
 
 ## License

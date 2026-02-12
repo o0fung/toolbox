@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "toolbox"
 version = "1.10.0"
-description = "Command-line toolbox: tree viewer + batch file processor, YouTube utilities, and a seven-segment clock."
+description = "Command-line toolbox: tree/work, YouTube helpers, terminal clock, cheque wording, and word utilities."
 readme = "README.md"
 requires-python = ">=3.8"
 license = { file = "LICENSE" }
