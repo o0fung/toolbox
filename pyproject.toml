@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 # Project metadata per PEP 621
 [project]
 name = "toolbox"
-version = "1.10.0"
+version = "1.10.1"
 description = "Command-line toolbox: tree/work, YouTube helpers, terminal clock, cheque wording, and word utilities."
 readme = "README.md"
 requires-python = ">=3.8"
