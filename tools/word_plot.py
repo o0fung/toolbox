@@ -240,7 +240,13 @@ def plot(
     xcol: Optional[str] = typer.Option(None, "-x", "--xcol", help="Column (name or index) to use as X axis (time/index). Default: auto from first column"),
     ycols: Optional[str] = typer.Option(None, "-y", "--ycols", help="Comma-separated columns (names or indices) for Y subplots. Default: all numeric except xcol"),
     xlim: Optional[str] = typer.Option(None, "--xlim", help="Row index range start,end inclusive (e.g. 200,300)."),
-    weight: float = typer.Option(1.0, "-w", "--weight", help="Line width (pixels) for plotted lines (e.g. 1, 1.5, 2)."),
+    weight: float = typer.Option(
+        1.0,
+        "-w",
+        "--weight",
+        help="Line width (pixels) in line mode (default) (e.g. 1, 1.5, 2).",
+    ),
+    points_only: bool = typer.Option(False, "-p", "--points-only", help="Plot points only (no connecting line)."),
 ) -> None:
     """Plot CSV columns using pyqtgraph with subplots per data column."""
     data = _read_csv(csv_path, delimiter)
@@ -350,7 +356,7 @@ def plot(
     except Exception:
         pass
 
-    if not (weight > 0):
+    if not points_only and not (weight > 0):
         raise typer.BadParameter("--weight must be > 0")
 
     pen_colors = [
@@ -364,6 +370,7 @@ def plot(
 
     first_plot = None
     nplots = len(ycols_list)
+    render_mode = "points-only" if points_only else "line"
     for i, (_idx, name, ys) in enumerate(ycols_list):
         is_last = i == nplots - 1
         axis_items = {"bottom": DateAxisItem(orientation="bottom")} if (x_kind == "time" and is_last) else None
@@ -396,7 +403,18 @@ def plot(
             plot_item.setXLink(first_plot)
 
         color = pen_colors[i % len(pen_colors)]
-        plot_item.plot(xs, ys, pen=pg.mkPen(color=color, width=weight))
+        if points_only:
+            plot_item.plot(
+                xs,
+                ys,
+                pen=None,
+                symbol="o",
+                symbolSize=4,
+                symbolBrush=color,
+                symbolPen=pg.mkPen(color=color, width=1),
+            )
+        else:
+            plot_item.plot(xs, ys, pen=pg.mkPen(color=color, width=weight))
         if first_plot is None:
             first_plot = plot_item
 
@@ -433,9 +451,14 @@ def plot(
         exporter.parameters()["height"] = max(600, per_plot_height * nplots)
         try:
             exporter.export(resolved_out)
+            save_details = (
+                f"(width={width_px}px, plots={nplots}, mode={render_mode}, line-width={weight})"
+                if not points_only
+                else f"(width={width_px}px, plots={nplots}, mode={render_mode}, point-size=4)"
+            )
             print(
                 f"[green]Saved PNG[/green]: {resolved_out} "
-                f"(width={width_px}px, plots={nplots}, line-width={weight})"
+                f"{save_details}"
             )
         except Exception as exc:
             raise typer.BadParameter(f"Failed export: {exc}") from exc
