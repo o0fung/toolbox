@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 import typer
 import yt_dlp
-from yt_dlp.utils import ExtractorError
+from yt_dlp.utils import DownloadError, ExtractorError
 
 try:
     from ._cli_common import new_typer_app
@@ -79,7 +79,8 @@ def youtube(
         fatal(str(exc))
 
     _show_meta(result)
-    _show_download_summary(video=video, audio=audio, subtitle=subtitle)
+    download_locations = _resolve_download_locations(result)
+    _show_download_summary(video=video, audio=audio, subtitle=subtitle, locations=download_locations)
 
 
 def _extract_info(url: str, ydl_opts: dict[str, Any], download: bool) -> dict[str, Any]:
@@ -151,7 +152,7 @@ def _download_with_fallback(
     format_candidates: tuple[str, ...],
 ) -> dict[str, Any]:
     skip_download = bool(ydl_opts.get("skip_download", False))
-    last_error: Optional[ExtractorError] = None
+    last_error: Optional[Exception] = None
 
     for idx, format_expr in enumerate(format_candidates):
         attempt_opts = dict(ydl_opts)
@@ -161,7 +162,7 @@ def _download_with_fallback(
             if idx > 0:
                 info(f"Succeeded with fallback format expression: {format_expr}")
             return result
-        except ExtractorError as exc:
+        except (ExtractorError, DownloadError) as exc:
             last_error = exc
             warn(f"Failed with format '{format_expr}': {exc}")
 
@@ -173,10 +174,101 @@ def _download_with_fallback(
     )
 
 
-def _show_download_summary(*, video: bool, audio: bool, subtitle: bool) -> None:
-    typer.echo(f">> Downloaded Video : {'OK' if video else 'None'}")
-    typer.echo(f">> Downloaded Audio : {'OK' if audio else 'None'}")
-    typer.echo(f">> Downloaded Subtitle : {'OK' if subtitle else 'None'}")
+def _show_download_summary(
+    *,
+    video: bool,
+    audio: bool,
+    subtitle: bool,
+    locations: dict[str, Optional[Path]],
+) -> None:
+    typer.echo(f">> Downloaded Video : {_status_with_location(video, locations.get('video'))}")
+    typer.echo(f">> Downloaded Audio : {_status_with_location(audio, locations.get('audio'))}")
+    typer.echo(f">> Downloaded Subtitle : {_status_with_location(subtitle, locations.get('subtitle'))}")
+
+
+def _status_with_location(enabled: bool, location: Optional[Path]) -> str:
+    if not enabled:
+        return "None"
+    if location is None:
+        return "OK"
+    return f"OK ({location})"
+
+
+def _resolve_download_locations(info: dict[str, Any]) -> dict[str, Optional[Path]]:
+    paths = _collect_paths_from_info(info)
+    video_exts = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv"}
+    audio_exts = {".mp3", ".m4a", ".aac", ".opus", ".ogg", ".wav", ".flac"}
+    subtitle_exts = {".srt", ".vtt", ".ass", ".ssa", ".ttml", ".srv1", ".srv2", ".srv3"}
+
+    def pick_path(exts: set[str]) -> Optional[Path]:
+        for path in paths:
+            if path.suffix.lower() in exts:
+                return path
+        return None
+
+    video_path = pick_path(video_exts)
+    audio_path = pick_path(audio_exts)
+    subtitle_path = pick_path(subtitle_exts)
+    primary_path = paths[0] if paths else None
+
+    if video_path is None:
+        video_path = primary_path
+    if audio_path is None and primary_path is not None:
+        # If audio was merged into the final video output, share that output path.
+        audio_path = primary_path
+
+    return {"video": video_path, "audio": audio_path, "subtitle": subtitle_path}
+
+
+def _collect_paths_from_info(info: dict[str, Any]) -> list[Path]:
+    seen: set[Path] = set()
+    ordered: list[Path] = []
+
+    def add_path(raw: Any) -> None:
+        if not raw or not isinstance(raw, str):
+            return
+        candidate = Path(raw).expanduser()
+        if candidate in seen:
+            return
+        seen.add(candidate)
+        ordered.append(candidate)
+
+    def visit(node: Any) -> None:
+        if isinstance(node, dict):
+            for key in ("filepath", "_filename", "filename"):
+                if key in node:
+                    add_path(node.get(key))
+
+            files_to_move = node.get("__files_to_move")
+            if isinstance(files_to_move, dict):
+                for source, target in files_to_move.items():
+                    add_path(source)
+                    add_path(target)
+
+            requested_downloads = node.get("requested_downloads")
+            if isinstance(requested_downloads, list):
+                for item in requested_downloads:
+                    visit(item)
+
+            requested_subtitles = node.get("requested_subtitles")
+            if isinstance(requested_subtitles, dict):
+                for item in requested_subtitles.values():
+                    visit(item)
+
+            entries = node.get("entries")
+            if isinstance(entries, list):
+                for entry in entries:
+                    visit(entry)
+
+            for value in node.values():
+                if isinstance(value, (dict, list)):
+                    visit(value)
+        elif isinstance(node, list):
+            for item in node:
+                visit(item)
+
+    visit(info)
+    return ordered
 
 
 def _show_meta(info: dict[str, Any]) -> None:

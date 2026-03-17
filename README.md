@@ -1,5 +1,5 @@
 
-# toolbox
+# lf-toolbox
 
 A set of useful command-line tools for enhancing productivity.
 
@@ -9,28 +9,48 @@ A set of useful command-line tools for enhancing productivity.
 - **youtube**: Download YouTube videos, audio, and subtitles, or display video metadata.
 - **clock**: Full-screen seven-segment terminal clock with stopwatch and countdown.
 - **cheque**: Convert HKD amounts (supports cents) to formal HK cheque wording in Traditional Chinese and English.
-- **word**: Convert Markdown to DOCX (CloudConvert) and plot CSV data with pyqtgraph subplots.
+- **plot**: Plot CSV data with pyqtgraph subplots.
 
 ## Installation
 
-1. Clone the repository:
-	```sh
-	git clone https://github.com/o0fung/toolbox.git
-	cd toolbox
-	```
-2. Install via pip (from Git):
-	```sh
-	pip install "git+https://github.com/o0fung/toolbox.git"
-	```
-
-Or for local development:
+Install from PyPI (recommended):
 ```sh
-pip install -r requirements.txt
+pipx install lf-toolbox
+```
+
+Or via pip:
+```sh
+pip install lf-toolbox
+```
+
+Install from GitHub:
+```sh
+pip install "git+https://github.com/o0fung/toolbox.git"
+```
+
+For local development:
+```sh
+git clone https://github.com/o0fung/toolbox.git
+cd toolbox
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install -e ".[dev]"
 ```
 
 ## Upgrade
 
-Upgrade to the latest from GitHub:
+Upgrade a pipx install:
+```sh
+pipx upgrade lf-toolbox
+```
+
+Upgrade a pip install:
+```sh
+pip install -U lf-toolbox
+```
+
+Upgrade from GitHub:
 ```sh
 pip install -U "git+https://github.com/o0fung/toolbox.git"
 ```
@@ -39,6 +59,10 @@ If pip says it's already satisfied or the version hasn't changed, force a reinst
 ```sh
 pip install -U --force-reinstall "git+https://github.com/o0fung/toolbox.git"
 ```
+
+## Publish to PyPI
+
+See `RELEASING.md` for the GitHub Release -> GitHub Actions -> PyPI publish checklist.
 
 ## Usage
 
@@ -271,40 +295,15 @@ Notes:
 
 ---
 
-## 🚩 word
-
-`word` contains two subcommands:
-- `md`: convert one Markdown file to DOCX via CloudConvert.
-- `plot`: plot CSV columns in stacked subplots using PyQt6 + pyqtgraph.
-
-### Markdown to DOCX (`word md`)
-
-Usage:
-```sh
-# From the repo
-python cli.py word md notes.md --api-key "$CLOUDCONVERT_API_KEY"
-
-# Installed entrypoint
-lf word md notes.md --api-key "$CLOUDCONVERT_API_KEY"
-
-# Or rely on environment variable
-export CLOUDCONVERT_API_KEY="your_api_key_here"
-lf word md notes.md
-```
-
-Options:
-- `--api-key`: CloudConvert API key. If omitted, `CLOUDCONVERT_API_KEY` env var is used.
-- `--verbose/--quiet`: Toggle detailed conversion steps.
-
-### CSV plotting (`word plot`)
+## 🚩 plot
 
 **Usage:**
 ```sh
 # From the repo
-python cli.py word plot FILE [options]
+python cli.py plot FILE [options]
 
 # Installed entrypoint
-lf word plot FILE [options]
+lf plot FILE [options]
 ```
 
 **Key Options:**
@@ -314,7 +313,7 @@ lf word plot FILE [options]
 - `-x, --xcol NAME|INDEX`: Column to use as X axis (time-like, numeric, or fallback to row indices). Default: first column.
 - `-y, --ycols COLS`: Comma-separated list of Y columns (names or indices). Default: all numeric except the chosen x column.
 - `--xlim start,end`: Row index slice (inclusive) before plotting. Accepts comma or colon: `--xlim 200,300` or `--xlim 200:300`. Empty start/end allowed (`,500` or `500,`).
-- `-s, --save`: Export a high‑resolution PNG (ImageExporter; independent of window size) next to the CSV (same basename) and exit. Env overrides: `WORD_EXPORT_WIDTH`, `WORD_EXPORT_PER_PLOT`.
+- `-s, --save`: Export a high‑resolution PNG (ImageExporter; independent of window size) next to the CSV (same basename) and exit. Env overrides: `PLOT_EXPORT_WIDTH`, `PLOT_EXPORT_PER_PLOT`.
 - `-w, --weight FLOAT`: Line width (in pixels) for all plotted lines (default 1.0). Increase (e.g. 2 or 3) to make thin signals more visible.
 - `-o, --out-path PATH`: Output PNG path or directory (implies `--save` if not explicitly provided). If a directory or ends with a path separator, the file name `<csv_basename>.png` is used. `.png` extension appended if missing.
 
@@ -339,28 +338,28 @@ lf word plot FILE [options]
 **Examples:**
 ```sh
 # Quick auto plot
-lf word plot ~/data/sensors.csv
+lf plot ~/data/sensors.csv
 
 # Tab-delimited with custom title
-lf word plot ~/data/log.tsv -d $'\t' -t "Device Log"
+lf plot ~/data/log.tsv -d $'\t' -t "Device Log"
 
 # Explicit x column by name and selected y columns
-lf word plot data.csv -x timestamp -y temperature,pressure,3
+lf plot data.csv -x timestamp -y temperature,pressure,3
 
 # Restrict to row indices 200..300
-lf word plot data.csv --xlim 200,300
+lf plot data.csv --xlim 200,300
 
 # Export a high-res PNG (no GUI)
-lf word plot data.csv -y acc_x,acc_y,acc_z -s
+lf plot data.csv -y acc_x,acc_y,acc_z -s
 
 # Export to a specific file path (auto-enables save mode)
-lf word plot data.csv -o ~/Desktop/plots/session1.png
+lf plot data.csv -o ~/Desktop/plots/session1.png
 
 # Custom export size via environment
-WORD_EXPORT_WIDTH=3000 WORD_EXPORT_PER_PLOT=250 lf word plot data.csv -s
+PLOT_EXPORT_WIDTH=3000 PLOT_EXPORT_PER_PLOT=250 lf plot data.csv -s
 
 # Thicker lines for visibility
-lf word plot data.csv -y acc_x,acc_y,acc_z -w 2.5
+lf plot data.csv -y acc_x,acc_y,acc_z -w 2.5
 ```
 
 **Console Output Summary:** (example)
@@ -405,9 +404,7 @@ tools/
 	youtube.py    # YouTube downloader tool
 	clock.py      # Full-screen seven-segment terminal clock
 	cheque.py     # HK cheque wording (Chinese + English)
-	word.py       # Word command group (registers subcommands)
-	word_md.py    # Markdown conversion (CloudConvert)
-	word_plot.py  # CSV plotting with pyqtgraph (PyQt6)
+	plot.py       # CSV plotting with pyqtgraph (PyQt6)
 tests/
 	test_cheque.py
 	test_tree.py

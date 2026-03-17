@@ -1,4 +1,4 @@
-"""CSV plotting command implementation for `word plot`."""
+"""CSV plotting command implementation for `plot`."""
 
 from __future__ import annotations
 
@@ -7,15 +7,16 @@ import math
 import os
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
 import typer
 from rich import print
 
 try:
+    from ._cli_common import new_typer_app
     from ._cli_output import warn
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from tools._cli_common import new_typer_app
     from tools._cli_output import warn
 
 try:
@@ -25,15 +26,13 @@ except Exception:  # pragma: no cover - optional dependency
     dateparser = None
 
 
+app = new_typer_app()
+
+
 @dataclass
 class ParsedCSV:
     headers: List[str]
     rows: List[List[str]]
-
-
-def register(app: typer.Typer) -> None:
-    """Register `plot` subcommand on a parent Typer app."""
-    app.command("plot")(plot)
 
 
 def _sniff_delimiter(sample: str, fallback: str = ",") -> str:
@@ -226,6 +225,7 @@ def _parse_xlim(xlim: Optional[str], total_points: int) -> Optional[Tuple[int, i
     return start, end
 
 
+@app.callback()
 def plot(
     csv_path: str = typer.Argument(..., help="Path to CSV file"),
     delimiter: Optional[str] = typer.Option(None, "-d", "--delimiter", help="CSV delimiter (auto if omitted)"),
@@ -437,13 +437,13 @@ def plot(
 
         target_item = getattr(win, "ci", None) or first_plot
         exporter = ImageExporter(target_item)
-        width_env = os.environ.get("WORD_EXPORT_WIDTH", "2400")
-        per_plot_env = os.environ.get("WORD_EXPORT_PER_PLOT", "210")
+        width_env = os.environ.get("PLOT_EXPORT_WIDTH", "2400")
+        per_plot_env = os.environ.get("PLOT_EXPORT_PER_PLOT", "210")
         try:
             width_px = int(width_env)
             per_plot_height = int(per_plot_env)
         except ValueError:
-            warn("WORD_EXPORT_WIDTH or WORD_EXPORT_PER_PLOT invalid; using defaults (2400, 210)")
+            warn("PLOT_EXPORT_WIDTH or PLOT_EXPORT_PER_PLOT invalid; using defaults (2400, 210)")
             width_px = 2400
             per_plot_height = 210
 
@@ -476,3 +476,7 @@ def plot(
     win.show()
     print("[dim]Press ESC to close the window.[/dim]")
     app_qt.exec()
+
+
+if __name__ == "__main__":
+    app()

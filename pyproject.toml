@@ -1,42 +1,50 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
-# Project metadata per PEP 621
 [project]
-name = "toolbox"
-version = "1.10.1"
-description = "Command-line toolbox: tree/work, YouTube helpers, terminal clock, cheque wording, and word utilities."
+name = "lf-toolbox"
+version = "1.10.2"
+description = "CLI toolbox with tree/work, YouTube helpers, terminal clock, cheque wording, and CSV plotting."
 readme = "README.md"
-requires-python = ">=3.8"
-license = { file = "LICENSE" }
+requires-python = ">=3.9"
+license = "MIT"
 authors = [
-	{ name = "o0fung" }
+    { name = "lf" }
 ]
-dynamic = ["dependencies"]
+keywords = ["cli", "toolbox", "typer", "utilities", "productivity"]
 classifiers = [
-	"Programming Language :: Python :: 3",
-	"License :: OSI Approved :: MIT License",
-	"Operating System :: OS Independent",
-	"Environment :: Console",
-	"Topic :: Utilities",
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+    "Topic :: Utilities",
 ]
+dependencies = [
+    "numpy>=2.0.0",
+    "PyQt6>=6.7.0",
+    "pyqtgraph>=0.13.7",
+    "rich>=14.0.0",
+    "typer>=0.16.0",
+    "yt-dlp>=2025.8.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+publish = ["build>=1.2.2", "twine>=6.1.0"]
+plot = ["python-dateutil>=2.9.0.post0"]
 
 [project.urls]
 Homepage = "https://github.com/o0fung/toolbox"
+Repository = "https://github.com/o0fung/toolbox"
+Issues = "https://github.com/o0fung/toolbox/issues"
 
-# Console scripts (entry points)
 [project.scripts]
 lf = "cli:app"
 
-# Setuptools-specific configuration
 [tool.setuptools]
 include-package-data = true
 py-modules = ["cli"]
 
 [tool.setuptools.packages.find]
 include = ["tools*"]
-
-# Read runtime dependencies from requirements.txt for a single source of truth
-[tool.setuptools.dynamic]
-dependencies = { file = ["requirements.txt"] }
+exclude = ["backup*", "tests*"]

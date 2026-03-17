@@ -1,8 +1,10 @@
 # Include important project files in the source distribution
 include README.md
+include RELEASING.md
 include LICENSE
 include requirements.txt
 include cli.py
 
 # Include package data specified by include_package_data=True
-recursive-include tools *
+recursive-include tools *.py
+global-exclude __pycache__ *.py[cod]
