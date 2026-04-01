@@ -8,6 +8,7 @@ Subcommands:
     - youtube: youtube/yt-dlp helpers
     - clock:   seven-segment clock, timer, countdown
     - cheque:  HK cheque wording (Traditional Chinese + English)
+    - pdf:     PDF compression via Ghostscript
     - plot:    CSV plotting with pyqtgraph subplots
 
 Examples:
@@ -17,6 +18,7 @@ Examples:
     python cli.py clock countdown 10        # 10 seconds
     python cli.py clock countdown 1 10      # 1 minute 10 seconds
     python cli.py cheque 123.45             # cheque wording with cents
+    python cli.py pdf input.pdf             # compress PDF
     python cli.py plot data.csv             # CSV plotting
 """
 

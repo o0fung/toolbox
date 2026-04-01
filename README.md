@@ -9,6 +9,7 @@ A set of useful command-line tools for enhancing productivity.
 - **youtube**: Download YouTube videos, audio, and subtitles, or display video metadata.
 - **clock**: Full-screen seven-segment terminal clock with stopwatch and countdown.
 - **cheque**: Convert HKD amounts (supports cents) to formal HK cheque wording in Traditional Chinese and English.
+- **pdf**: Compress PDF files using Ghostscript quality presets.
 - **plot**: Plot CSV data with pyqtgraph subplots.
 
 ## Installation
@@ -196,6 +197,12 @@ python cli.py youtube https://www.youtube.com/watch?v=ID --fmt "bestvideo[height
 - Use `--fmt` for full control; all yt-dlp format selectors are supported.
 - Output directory is echoed at start: `[info] Output directory: /path/...`
 - When all format attempts fail you will see a hint to run `--list`.
+- Video/audio flows may require system FFmpeg tools (`ffmpeg`, `ffprobe`):
+  - macOS: `brew install ffmpeg`
+  - Ubuntu/Debian: `sudo apt install ffmpeg`
+  - Windows: `winget install Gyan.FFmpeg`
+- Missing `ffmpeg`/`ffprobe` can trigger an interactive install prompt (`y/N`) using an available package manager (e.g. brew/apt/dnf/yum/pacman/zypper/winget/choco).
+- If Python `yt-dlp` module is missing, an interactive install prompt is also available.
 
 ---
 
@@ -292,6 +299,45 @@ English: Hong Kong Dollars Zero and five cents only
 
 Notes:
 - Extend English scales beyond trillion by editing `tools/cheque.py` if needed.
+
+---
+
+## 🚩 pdf
+
+Compress PDF files via Ghostscript.
+
+Usage:
+```sh
+# From the repo
+python cli.py pdf INPUT.pdf [options]
+
+# Installed entrypoint
+lf pdf INPUT.pdf [options]
+```
+
+Options:
+- `INPUT.pdf` (required): Source PDF file path.
+- `-o, --out PATH`: Output PDF path. Default is `<input_stem>_compressed.pdf` in the same folder.
+- `-q, --quality`: Compression profile. One of: `screen`, `ebook` (default), `printer`, `prepress`, `default`.
+
+Examples:
+```sh
+# Default profile (ebook)
+lf pdf ~/Desktop/report.pdf
+
+# Stronger compression for on-screen reading
+lf pdf ~/Desktop/report.pdf -q screen
+
+# Keep higher print quality and choose output path
+lf pdf ~/Desktop/report.pdf -q printer -o ~/Desktop/report_print.pdf
+```
+
+Notes:
+- Requires Ghostscript (`gs`) installed and available on PATH.
+- macOS install: `brew install ghostscript`
+- Missing `gs` can trigger an interactive install prompt (`y/N`) using an available package manager (e.g. brew/apt/dnf/yum/pacman/zypper/winget/choco).
+- Output path must be different from input path.
+- Compression ratio depends on source content (embedded images/fonts/compression).
 
 ---
 
@@ -399,14 +445,17 @@ Notes:
 cli.py          # Main CLI entry point
 tools/
 	_cli_common.py # Shared Typer app factory
+	_deps.py      # Runtime dependency install prompts
 	_cli_output.py # Shared CLI output helpers
 	tree.py       # Directory tree tool
 	youtube.py    # YouTube downloader tool
 	clock.py      # Full-screen seven-segment terminal clock
 	cheque.py     # HK cheque wording (Chinese + English)
+	pdf.py        # PDF compression via Ghostscript
 	plot.py       # CSV plotting with pyqtgraph (PyQt6)
 tests/
 	test_cheque.py
+	test_pdf.py
 	test_tree.py
 ```
 

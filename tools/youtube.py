@@ -1,16 +1,38 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 from typing import Any, Optional
 
 import typer
-import yt_dlp
-from yt_dlp.utils import DownloadError, ExtractorError
+try:
+    import yt_dlp
+    from yt_dlp.utils import DownloadError, ExtractorError
+except ModuleNotFoundError:  # pragma: no cover - optional runtime recovery
+    yt_dlp = None  # type: ignore[assignment]
+
+    class DownloadError(Exception):
+        pass
+
+    class ExtractorError(Exception):
+        pass
 
 try:
+    from ._deps import (
+        ensure_binary_or_prompt_install,
+        ensure_python_module_or_prompt_install,
+        ffmpeg_install_options,
+        yt_dlp_install_options,
+    )
     from ._cli_common import new_typer_app
     from ._cli_output import error, fatal, info, warn
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from tools._deps import (
+        ensure_binary_or_prompt_install,
+        ensure_python_module_or_prompt_install,
+        ffmpeg_install_options,
+        yt_dlp_install_options,
+    )
     from tools._cli_common import new_typer_app
     from tools._cli_output import error, fatal, info, warn
 
@@ -53,6 +75,8 @@ def youtube(
     out: Optional[Path] = typer.Option(None, "--out", help="Output directory (default: ~/Desktop)"),
 ) -> None:
     """Download YouTube content, list formats, or print metadata."""
+    _ensure_yt_dlp_available()
+
     if list_formats:
         _print_formats(_extract_info(url, ydl_opts={}, download=False))
         return
@@ -60,6 +84,8 @@ def youtube(
     if not (video or audio or subtitle or fmt):
         _show_meta(_extract_info(url, ydl_opts={}, download=False))
         return
+
+    _require_ffmpeg_tools(video=video, audio=audio, subtitle=subtitle, fmt=fmt)
 
     output_dir = _resolve_output_dir(out)
     info(f"Output directory: {output_dir}")
@@ -81,6 +107,97 @@ def youtube(
     _show_meta(result)
     download_locations = _resolve_download_locations(result)
     _show_download_summary(video=video, audio=audio, subtitle=subtitle, locations=download_locations)
+
+
+def _ensure_yt_dlp_available() -> None:
+    global yt_dlp
+    if yt_dlp is not None:
+        return
+
+    ok = ensure_python_module_or_prompt_install(
+        import_name="yt_dlp",
+        missing_message=(
+            "Python module `yt_dlp` is missing. "
+            "Install it via pip/pipx/system package manager to use youtube tool."
+        ),
+        options=yt_dlp_install_options(),
+    )
+    if not ok:
+        fatal("Missing required dependency `yt-dlp`.")
+
+    try:
+        import yt_dlp as yt_dlp_module
+        from yt_dlp.utils import DownloadError as DownloadErrorType
+        from yt_dlp.utils import ExtractorError as ExtractorErrorType
+    except Exception as exc:
+        fatal(f"`yt-dlp` was installed but import still failed: {exc}")
+
+    yt_dlp = yt_dlp_module
+    globals()["DownloadError"] = DownloadErrorType
+    globals()["ExtractorError"] = ExtractorErrorType
+
+
+def _require_ffmpeg_tools(
+    *,
+    video: bool,
+    audio: bool,
+    subtitle: bool,
+    fmt: Optional[str],
+) -> None:
+    """
+    Ensure ffmpeg tooling is available when a media download path may need it.
+
+    Flow:
+    1) Skip checks for metadata/list flows (handled by caller) and subtitle-only mode.
+    2) Enforce checks for explicit audio/video downloads.
+    3) For --fmt-only downloads, warn instead of hard-fail because some direct formats
+       may succeed without post-processing, while others still require ffmpeg.
+    """
+    subtitle_only = subtitle and not (video or audio or fmt)
+    if subtitle_only:
+        return
+
+    ffmpeg_path = shutil.which("ffmpeg")
+    ffprobe_path = shutil.which("ffprobe")
+    missing = [name for name, path in (("ffmpeg", ffmpeg_path), ("ffprobe", ffprobe_path)) if path is None]
+    if not missing:
+        return
+
+    missing_str = ", ".join(missing)
+    install_hint = (
+        f"Missing required system tools: {missing_str}. "
+        "Install FFmpeg so both ffmpeg and ffprobe are on PATH. "
+        "macOS: `brew install ffmpeg`; Ubuntu/Debian: `sudo apt install ffmpeg`; "
+        "Windows: `winget install Gyan.FFmpeg`."
+    )
+
+    # Recovery flow for missing ffmpeg tooling:
+    # 1) In download modes that require post-processing (video/audio), try a Homebrew
+    #    install prompt on macOS to unblock the command in-place.
+    # 2) Re-check both ffmpeg and ffprobe because yt-dlp workflows often need both.
+    # 3) Keep --fmt-only behavior non-fatal, but still offer the same install prompt.
+    if video or audio:
+        ensured_ffmpeg = ffmpeg_path or ensure_binary_or_prompt_install(
+            binary="ffmpeg",
+            missing_message=install_hint,
+            options=ffmpeg_install_options(),
+        )
+        ensured_ffprobe = ffprobe_path or shutil.which("ffprobe")
+        if ensured_ffmpeg and ensured_ffprobe:
+            return
+        fatal(install_hint)
+
+    if fmt and not (video or audio):
+        _ = ffmpeg_path or ensure_binary_or_prompt_install(
+            binary="ffmpeg",
+            missing_message=install_hint,
+            options=ffmpeg_install_options(),
+        )
+        if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+            warn(
+                install_hint
+                + " This run may still work for some direct formats, but merging/conversion can fail."
+            )
 
 
 def _extract_info(url: str, ydl_opts: dict[str, Any], download: bool) -> dict[str, Any]:
