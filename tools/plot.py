@@ -7,7 +7,7 @@ import math
 import os
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import typer
 from rich import print
@@ -225,6 +225,34 @@ def _parse_xlim(xlim: Optional[str], total_points: int) -> Optional[Tuple[int, i
     return start, end
 
 
+def _nearest_finite_sample_index(xs: List[float], ys: List[float], target_x: float) -> Optional[int]:
+    """Find nearest index by x where both x and y are finite."""
+    nearest_idx: Optional[int] = None
+    nearest_dist = math.inf
+    for idx, x_val in enumerate(xs):
+        if idx >= len(ys):
+            continue
+        y_val = ys[idx]
+        if not (math.isfinite(x_val) and math.isfinite(y_val)):
+            continue
+        distance = abs(x_val - target_x)
+        if distance < nearest_dist:
+            nearest_dist = distance
+            nearest_idx = idx
+    return nearest_idx
+
+
+def _format_x_value(x_value: float, x_kind: str) -> str:
+    if not math.isfinite(x_value):
+        return "nan"
+    if x_kind == "time":
+        try:
+            return datetime.fromtimestamp(x_value).isoformat(sep=" ", timespec="seconds")
+        except Exception:
+            return f"{x_value:.6g}"
+    return f"{x_value:.6g}"
+
+
 @app.callback()
 def plot(
     csv_path: str = typer.Argument(..., help="Path to CSV file"),
@@ -244,7 +272,7 @@ def plot(
         1.0,
         "-w",
         "--weight",
-        help="Line width (pixels) in line mode (default) (e.g. 1, 1.5, 2).",
+        help="Stroke width/point size in pixels for line and points-only modes (default: 1.0).",
     ),
     points_only: bool = typer.Option(False, "-p", "--points-only", help="Plot points only (no connecting line)."),
 ) -> None:
@@ -328,7 +356,7 @@ def plot(
         )
 
     try:
-        from PyQt6 import QtWidgets
+        from PyQt6 import QtCore, QtWidgets
         import pyqtgraph as pg
         from pyqtgraph import DateAxisItem
     except Exception as exc:
@@ -356,7 +384,7 @@ def plot(
     except Exception:
         pass
 
-    if not points_only and not (weight > 0):
+    if not (weight > 0):
         raise typer.BadParameter("--weight must be > 0")
 
     pen_colors = [
@@ -369,6 +397,7 @@ def plot(
     ]
 
     first_plot = None
+    plot_items: List[object] = []
     nplots = len(ycols_list)
     render_mode = "points-only" if points_only else "line"
     for i, (_idx, name, ys) in enumerate(ycols_list):
@@ -409,14 +438,15 @@ def plot(
                 ys,
                 pen=None,
                 symbol="o",
-                symbolSize=4,
+                symbolSize=weight,
                 symbolBrush=color,
-                symbolPen=pg.mkPen(color=color, width=1),
+                symbolPen=pg.mkPen(color=color, width=weight),
             )
         else:
             plot_item.plot(xs, ys, pen=pg.mkPen(color=color, width=weight))
         if first_plot is None:
             first_plot = plot_item
+        plot_items.append(plot_item)
 
     app_qt.processEvents()
 
@@ -454,7 +484,7 @@ def plot(
             save_details = (
                 f"(width={width_px}px, plots={nplots}, mode={render_mode}, line-width={weight})"
                 if not points_only
-                else f"(width={width_px}px, plots={nplots}, mode={render_mode}, point-size=4)"
+                else f"(width={width_px}px, plots={nplots}, mode={render_mode}, point-size={weight})"
             )
             print(
                 f"[green]Saved PNG[/green]: {resolved_out} "
@@ -463,6 +493,98 @@ def plot(
         except Exception as exc:
             raise typer.BadParameter(f"Failed export: {exc}") from exc
         return
+
+    if first_plot is not None and plot_items:
+        marker_state: Dict[str, Dict[str, object]] = {
+            "left": {
+                "color": (220, 20, 60),
+                "lines": [],
+                "labels": [],
+            },
+            "right": {
+                "color": (25, 118, 210),
+                "lines": [],
+                "labels": [],
+            },
+        }
+
+        # Click handling is order-sensitive:
+        # 1) detect which subplot received the scene click,
+        # 2) map that scene point to data-space X on that subplot,
+        # 3) update one marker channel (left/red or right/blue),
+        # 4) mirror line+value annotations onto every subplot at the same X.
+        def _resolve_clicked_x(scene_pos: object) -> Optional[float]:
+            for plot_item in plot_items:
+                if plot_item.sceneBoundingRect().contains(scene_pos):
+                    return float(plot_item.vb.mapSceneToView(scene_pos).x())
+            return None
+
+        def _ensure_marker_items(channel: str) -> None:
+            state = marker_state[channel]
+            lines = state["lines"]
+            labels = state["labels"]
+            if lines and labels:
+                return
+
+            color = state["color"]
+            for plot_item in plot_items:
+                line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(color=color, width=1.5))
+                line.setZValue(1000)
+                plot_item.addItem(line)
+                lines.append(line)
+
+                label = pg.TextItem(anchor=(0, 1), color=color)
+                label.setZValue(1001)
+                plot_item.addItem(label)
+                labels.append(label)
+
+        def _update_markers(channel: str, clicked_x: float) -> None:
+            _ensure_marker_items(channel)
+            state = marker_state[channel]
+            lines = state["lines"]
+            labels = state["labels"]
+            x_display = _format_x_value(clicked_x, x_kind)
+
+            for idx, plot_item in enumerate(plot_items):
+                lines[idx].setPos(clicked_x)
+
+                _series_idx, series_name, ys = ycols_list[idx]
+                nearest_idx = _nearest_finite_sample_index(xs, ys, clicked_x)
+                if nearest_idx is None:
+                    y_value = math.nan
+                    y_pos = float(plot_item.viewRange()[1][1])
+                else:
+                    y_value = ys[nearest_idx]
+                    y_pos = y_value
+
+                y_display = "nan" if not math.isfinite(y_value) else f"{y_value:.6g}"
+                labels[idx].setText(f"{series_name}: {y_display} @ x={x_display}")
+                labels[idx].setPos(clicked_x, y_pos)
+
+        def _on_scene_click(event: object) -> None:
+            try:
+                button = event.button()
+            except Exception:
+                return
+
+            if button == QtCore.Qt.MouseButton.LeftButton:
+                channel = "left"
+            elif button == QtCore.Qt.MouseButton.RightButton:
+                channel = "right"
+            else:
+                return
+
+            clicked_x = _resolve_clicked_x(event.scenePos())
+            if clicked_x is None or not math.isfinite(clicked_x):
+                return
+
+            _update_markers(channel, clicked_x)
+            try:
+                event.accept()
+            except Exception:
+                pass
+
+        first_plot.scene().sigMouseClicked.connect(_on_scene_click)
 
     try:
         from PyQt6 import QtCore, QtGui  # type: ignore
