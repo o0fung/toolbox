@@ -400,11 +400,32 @@ def plot(
     plot_items: List[object] = []
     nplots = len(ycols_list)
     render_mode = "points-only" if points_only else "line"
+
+    # Keep subplot labels pinned to each plot's top-left corner across zoom/pan.
+    # Flow:
+    # 1) place label with small relative padding from current view bounds,
+    # 2) skip invalid ranges (startup/empty ranges can be non-finite),
+    # 3) re-run placement on every range change to preserve corner anchoring.
+    def _position_subplot_label(plot_item: object, label_item: object) -> None:
+        try:
+            (x_min, x_max), (y_min, y_max) = plot_item.viewRange()
+        except Exception:
+            return
+
+        if not all(math.isfinite(value) for value in (x_min, x_max, y_min, y_max)):
+            return
+
+        x_span = x_max - x_min
+        y_span = y_max - y_min
+        x_pad = (x_span * 0.02) if x_span > 0 else 1.0
+        y_pad = (y_span * 0.05) if y_span > 0 else 1.0
+        label_item.setPos(x_min + x_pad, y_max - y_pad)
+
     for i, (_idx, name, ys) in enumerate(ycols_list):
         is_last = i == nplots - 1
         axis_items = {"bottom": DateAxisItem(orientation="bottom")} if (x_kind == "time" and is_last) else None
         plot_item = win.addPlot(row=i, col=0, axisItems=axis_items)
-        plot_item.setLabel("left", name)
+        plot_item.setLabel("left", "")
         plot_item.showGrid(x=True, y=True, alpha=0.12)
         try:
             plot_item.getAxis("left").setPen("k")
@@ -413,6 +434,15 @@ def plot(
             plot_item.getAxis("bottom").setTextPen("k")
         except Exception:
             pass
+
+        series_label = pg.TextItem(text=name, anchor=(0, 0), color=(0, 0, 0))
+        series_label.setZValue(900)
+        # Keep label out of auto-range bounds; otherwise range updates can
+        # recursively expand x/y limits while we keep re-anchoring top-left.
+        plot_item.addItem(series_label, ignoreBounds=True)
+        plot_item.vb.sigRangeChanged.connect(
+            lambda *_args, item=plot_item, label=series_label: _position_subplot_label(item, label)
+        )
 
         if not is_last:
             try:
@@ -444,6 +474,7 @@ def plot(
             )
         else:
             plot_item.plot(xs, ys, pen=pg.mkPen(color=color, width=weight))
+        _position_subplot_label(plot_item, series_label)
         if first_plot is None:
             first_plot = plot_item
         plot_items.append(plot_item)
