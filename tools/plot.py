@@ -398,15 +398,22 @@ def plot(
 
     first_plot = None
     plot_items: List[object] = []
+    subplot_red_labels: List[object] = []
+    subplot_blue_labels: List[object] = []
     nplots = len(ycols_list)
     render_mode = "points-only" if points_only else "line"
 
-    # Keep subplot labels pinned to each plot's top-left corner across zoom/pan.
+    # Keep subplot labels pinned to stable corners across zoom/pan.
     # Flow:
-    # 1) place label with small relative padding from current view bounds,
+    # 1) place labels with small relative padding from current view bounds,
     # 2) skip invalid ranges (startup/empty ranges can be non-finite),
     # 3) re-run placement on every range change to preserve corner anchoring.
-    def _position_subplot_label(plot_item: object, label_item: object) -> None:
+    def _position_subplot_labels(
+        plot_item: object,
+        name_label_item: object,
+        red_label_item: object,
+        blue_label_item: object,
+    ) -> None:
         try:
             (x_min, x_max), (y_min, y_max) = plot_item.viewRange()
         except Exception:
@@ -419,7 +426,9 @@ def plot(
         y_span = y_max - y_min
         x_pad = (x_span * 0.02) if x_span > 0 else 1.0
         y_pad = (y_span * 0.05) if y_span > 0 else 1.0
-        label_item.setPos(x_min + x_pad, y_max - y_pad)
+        name_label_item.setPos(x_min + x_pad, y_max - y_pad)
+        red_label_item.setPos(x_max - x_pad, y_max - y_pad)
+        blue_label_item.setPos(x_max - x_pad, y_min + y_pad)
 
     for i, (_idx, name, ys) in enumerate(ycols_list):
         is_last = i == nplots - 1
@@ -436,12 +445,23 @@ def plot(
             pass
 
         series_label = pg.TextItem(text=name, anchor=(0, 0), color=(0, 0, 0))
-        series_label.setZValue(900)
-        # Keep label out of auto-range bounds; otherwise range updates can
-        # recursively expand x/y limits while we keep re-anchoring top-left.
+        series_label.setZValue(1100)
+        red_marker_label = pg.TextItem(text="", anchor=(1, 0), color=(220, 20, 60))
+        red_marker_label.setZValue(1101)
+        blue_marker_label = pg.TextItem(text="", anchor=(1, 1), color=(25, 118, 210))
+        blue_marker_label.setZValue(1101)
+        # Keep corner labels out of auto-range bounds; otherwise range updates
+        # can recursively expand limits while labels are re-anchored each frame.
         plot_item.addItem(series_label, ignoreBounds=True)
+        plot_item.addItem(red_marker_label, ignoreBounds=True)
+        plot_item.addItem(blue_marker_label, ignoreBounds=True)
         plot_item.vb.sigRangeChanged.connect(
-            lambda *_args, item=plot_item, label=series_label: _position_subplot_label(item, label)
+            lambda *_args, item=plot_item, name_item=series_label, red_item=red_marker_label, blue_item=blue_marker_label: _position_subplot_labels(
+                item,
+                name_item,
+                red_item,
+                blue_item,
+            )
         )
 
         if not is_last:
@@ -474,10 +494,12 @@ def plot(
             )
         else:
             plot_item.plot(xs, ys, pen=pg.mkPen(color=color, width=weight))
-        _position_subplot_label(plot_item, series_label)
+        _position_subplot_labels(plot_item, series_label, red_marker_label, blue_marker_label)
         if first_plot is None:
             first_plot = plot_item
         plot_items.append(plot_item)
+        subplot_red_labels.append(red_marker_label)
+        subplot_blue_labels.append(blue_marker_label)
 
     app_qt.processEvents()
 
@@ -530,12 +552,10 @@ def plot(
             "left": {
                 "color": (220, 20, 60),
                 "lines": [],
-                "labels": [],
             },
             "right": {
                 "color": (25, 118, 210),
                 "lines": [],
-                "labels": [],
             },
         }
 
@@ -553,8 +573,7 @@ def plot(
         def _ensure_marker_items(channel: str) -> None:
             state = marker_state[channel]
             lines = state["lines"]
-            labels = state["labels"]
-            if lines and labels:
+            if lines:
                 return
 
             color = state["color"]
@@ -564,33 +583,30 @@ def plot(
                 plot_item.addItem(line)
                 lines.append(line)
 
-                label = pg.TextItem(anchor=(0, 1), color=color)
-                label.setZValue(1001)
-                plot_item.addItem(label)
-                labels.append(label)
-
         def _update_markers(channel: str, clicked_x: float) -> None:
             _ensure_marker_items(channel)
             state = marker_state[channel]
             lines = state["lines"]
-            labels = state["labels"]
             x_display = _format_x_value(clicked_x, x_kind)
+            channel_labels = subplot_red_labels if channel == "left" else subplot_blue_labels
+            channel_name = "red line" if channel == "left" else "blue line"
 
+            # Marker updates are channel-specific:
+            # - move the selected channel's vertical lines on all subplots,
+            # - refresh only that corner label (top-right red / bottom-right blue),
+            # - preserve the opposite channel label text until that channel updates.
             for idx, plot_item in enumerate(plot_items):
                 lines[idx].setPos(clicked_x)
 
-                _series_idx, series_name, ys = ycols_list[idx]
+                _series_idx, _series_name, ys = ycols_list[idx]
                 nearest_idx = _nearest_finite_sample_index(xs, ys, clicked_x)
                 if nearest_idx is None:
                     y_value = math.nan
-                    y_pos = float(plot_item.viewRange()[1][1])
                 else:
                     y_value = ys[nearest_idx]
-                    y_pos = y_value
 
                 y_display = "nan" if not math.isfinite(y_value) else f"{y_value:.6g}"
-                labels[idx].setText(f"{series_name}: {y_display} @ x={x_display}")
-                labels[idx].setPos(clicked_x, y_pos)
+                channel_labels[idx].setText(f"{channel_name}: {y_display} @ x={x_display}")
 
         def _on_scene_click(event: object) -> None:
             try:
