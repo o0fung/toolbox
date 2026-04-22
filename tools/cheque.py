@@ -10,7 +10,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from tools._cli_common import new_typer_app
 
 
-app = new_typer_app()
+app = new_typer_app(context_settings={"allow_interspersed_args": True})
 
 # English helper currently supports up to trillion group (< 10^15)
 _MAX_DOLLARS = 10**15 - 1

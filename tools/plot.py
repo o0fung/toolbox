@@ -26,7 +26,7 @@ except Exception:  # pragma: no cover - optional dependency
     dateparser = None
 
 
-app = new_typer_app()
+app = new_typer_app(context_settings={"allow_interspersed_args": True})
 
 
 @dataclass
@@ -199,7 +199,7 @@ def _resolve_output_path(csv_path: str, out_path: Optional[str]) -> str:
     return candidate
 
 
-def _parse_xlim(xlim: Optional[str], total_points: int) -> Optional[Tuple[int, int]]:
+def _parse_xlim(xlim: Optional[str]) -> Optional[Tuple[Optional[float], Optional[float]]]:
     if xlim is None:
         return None
 
@@ -213,16 +213,60 @@ def _parse_xlim(xlim: Optional[str], total_points: int) -> Optional[Tuple[int, i
         raise typer.BadParameter("--xlim expects exactly two numbers: start,end")
 
     try:
-        start = int(parts[0]) if parts[0] != "" else 0
-        end = int(parts[1]) if parts[1] != "" else total_points - 1
+        start = float(parts[0]) if parts[0] != "" else None
+        end = float(parts[1]) if parts[1] != "" else None
     except ValueError:
-        raise typer.BadParameter("--xlim values must be integers")
+        raise typer.BadParameter("--xlim values must be numbers")
 
-    start = max(0, start)
-    end = min(total_points - 1, end)
-    if start > end:
-        raise typer.BadParameter("Index trim invalid: start > end")
+    if start is not None and not math.isfinite(start):
+        raise typer.BadParameter("--xlim start must be finite")
+    if end is not None and not math.isfinite(end):
+        raise typer.BadParameter("--xlim end must be finite")
+    if start is not None and end is not None and start > end:
+        raise typer.BadParameter("X range invalid: start > end")
     return start, end
+
+
+def _filter_scaled_xlim(
+    xs: List[float],
+    ycols_list: List[Tuple[int, str, List[float]]],
+    xlim: Optional[Tuple[Optional[float], Optional[float]]],
+) -> Tuple[
+    List[float],
+    List[Tuple[int, str, List[float]]],
+    Optional[Tuple[float, float]],
+    Optional[Tuple[float, float]],
+]:
+    if xlim is None:
+        return xs, ycols_list, None, None
+
+    # Clamp requested bounds to finite data extents first, then apply an inclusive
+    # value-based filter on scaled x values. This keeps oversized requested ranges
+    # usable while still failing clearly when no data point falls in the final range.
+    finite_xs = [x for x in xs if math.isfinite(x)]
+    if not finite_xs:
+        raise typer.BadParameter("Cannot apply --xlim: x-axis has no finite values")
+
+    data_min = min(finite_xs)
+    data_max = max(finite_xs)
+    req_start, req_end = xlim
+    start = data_min if req_start is None else min(max(req_start, data_min), data_max)
+    end = data_max if req_end is None else min(max(req_end, data_min), data_max)
+    if start > end:
+        raise typer.BadParameter("X trim invalid after clamping: start > end")
+
+    selected_indices = [idx for idx, x in enumerate(xs) if math.isfinite(x) and start <= x <= end]
+    if not selected_indices:
+        raise typer.BadParameter(
+            f"--xlim selected no data points after clamping (data range: [{data_min:.6g},{data_max:.6g}])"
+        )
+
+    filtered_xs = [xs[i] for i in selected_indices]
+    filtered_ycols = [
+        (idx, name, [arr[i] if i < len(arr) else math.nan for i in selected_indices])
+        for idx, name, arr in ycols_list
+    ]
+    return filtered_xs, filtered_ycols, (start, end), (data_min, data_max)
 
 
 def _nearest_finite_sample_index(xs: List[float], ys: List[float], target_x: float) -> Optional[int]:
@@ -258,16 +302,26 @@ def plot(
     csv_path: str = typer.Argument(..., help="Path to CSV file"),
     delimiter: Optional[str] = typer.Option(None, "-d", "--delimiter", help="CSV delimiter (auto if omitted)"),
     title: Optional[str] = typer.Option(None, "-t", "--title", help="Window title"),
-    save: bool = typer.Option(False, "-s", "--save", help="Export a high-resolution PNG (ImageExporter) and exit."),
+    scale: float = typer.Option(
+        1.0,
+        "-s",
+        "--scale",
+        help="Multiply plotted X values by this factor (e.g. frame_id to seconds: 0.02 at 50 Hz).",
+    ),
+    export: bool = typer.Option(False, "-e", "--export", help="Export a high-resolution PNG (ImageExporter) and exit."),
     out_path: Optional[str] = typer.Option(
         None,
         "-o",
         "--out-path",
-        help="Output PNG file path or directory when using --save. If a directory or ends with a path separator, the file name <csv_basename>.png is used. Extension .png will be appended if missing. Providing this flag implies --save if not explicitly set.",
+        help="Output PNG file path or directory when using --export. If a directory or ends with a path separator, the file name <csv_basename>.png is used. Extension .png will be appended if missing. Providing this flag implies --export if not explicitly set.",
     ),
     xcol: Optional[str] = typer.Option(None, "-x", "--xcol", help="Column (name or index) to use as X axis (time/index). Default: auto from first column"),
     ycols: Optional[str] = typer.Option(None, "-y", "--ycols", help="Comma-separated columns (names or indices) for Y subplots. Default: all numeric except xcol"),
-    xlim: Optional[str] = typer.Option(None, "--xlim", help="Row index range start,end inclusive (e.g. 200,300)."),
+    xlim: Optional[str] = typer.Option(
+        None,
+        "--xlim",
+        help="Scaled x-value range start,end inclusive (e.g. 10.5,22.0). Accepts comma or colon.",
+    ),
     weight: float = typer.Option(
         1.0,
         "-w",
@@ -290,6 +344,11 @@ def plot(
     x_kind, xs, _ = _column_as_x(data.rows, x_index) if x_index >= 0 else ("row", [], "row")
     total_original_points = len(xs)
     x_name = data.headers[x_index] if (0 <= x_index < len(data.headers)) else "row"
+    if not math.isfinite(scale) or math.isclose(scale, 0.0, abs_tol=1e-12):
+        raise typer.BadParameter("--scale must be a finite non-zero number")
+    scale_enabled = not math.isclose(scale, 1.0, rel_tol=0.0, abs_tol=1e-12)
+    if x_kind == "time" and scale_enabled:
+        raise typer.BadParameter("--scale is not supported with datetime-like x-axis values")
 
     if ycols:
         chosen_indices: List[int] = []
@@ -333,27 +392,35 @@ def plot(
         print(f"Using x-axis: {x_kind} (column: {x_name}[{x_index}])")
     else:
         print(f"Using x-axis: {x_kind} (column: row index)")
+    if scale_enabled:
+        print(f"Applying x-axis scale: x_plot = x_raw * {scale:.6g}")
     print(f"Y subplots: ({len(selected_pairs)} / {len(all_candidate_indices)})")
     print(f"Selected channels ({len(selected_display)}): " + (", ".join(selected_display) if selected_display else "(none)"))
     print(f"Unselected channels ({len(unselected_display)}): " + (", ".join(unselected_display) if unselected_display else "(none)"))
 
-    trimmed_range = _parse_xlim(xlim, len(xs))
-    if trimmed_range is not None:
-        start, end = trimmed_range
-        indices = range(start, end + 1)
-        xs = [xs[i] for i in indices]
-        ycols_list = [
-            (idx, name, [arr[i] if i < len(arr) else math.nan for i in indices])
-            for idx, name, arr in ycols_list
-        ]
+    requested_xlim = _parse_xlim(xlim)
+    if scale_enabled:
+        xs = [x * scale if math.isfinite(x) else x for x in xs]
+    xs, ycols_list, applied_xlim, data_xlim = _filter_scaled_xlim(xs, ycols_list, requested_xlim)
 
-    if len(xs) == total_original_points:
+    if requested_xlim is None and len(xs) == total_original_points:
         print(f"Data points (x): {len(xs)} (full dataset)")
-    elif trimmed_range is not None:
+    elif applied_xlim is not None:
+        req_start, req_end = requested_xlim
+        req_start_txt = "" if req_start is None else f"{req_start:.6g}"
+        req_end_txt = "" if req_end is None else f"{req_end:.6g}"
         print(
-            f"Data points (x): [{trimmed_range[0]},{trimmed_range[1]}] "
+            f"Data points (x): [{applied_xlim[0]:.6g},{applied_xlim[1]:.6g}] "
             f"({len(xs)} / {total_original_points} points selected)"
         )
+        if data_xlim is not None and (
+            (req_start is not None and not math.isclose(req_start, applied_xlim[0], rel_tol=0.0, abs_tol=1e-12))
+            or (req_end is not None and not math.isclose(req_end, applied_xlim[1], rel_tol=0.0, abs_tol=1e-12))
+        ):
+            print(
+                f"--xlim [{req_start_txt},{req_end_txt}] clamped to data range "
+                f"[{data_xlim[0]:.6g},{data_xlim[1]:.6g}]"
+            )
 
     try:
         from PyQt6 import QtCore, QtWidgets
@@ -473,10 +540,10 @@ def plot(
                 pass
         elif x_kind == "time":
             plot_item.setLabel("bottom", "Time")
-        elif x_kind == "index":
-            plot_item.setLabel("bottom", x_name)
         else:
-            plot_item.setLabel("bottom", "Index")
+            base_x_label = x_name if x_kind == "index" else "Index"
+            x_label = f"{base_x_label} * {scale:.6g}" if scale_enabled else base_x_label
+            plot_item.setLabel("bottom", x_label)
 
         if first_plot is not None:
             plot_item.setXLink(first_plot)
@@ -503,11 +570,11 @@ def plot(
 
     app_qt.processEvents()
 
-    if out_path is not None and not save:
-        warn("--out-path provided without --save; enabling save mode.")
-        save = True
+    if out_path is not None and not export:
+        warn("--out-path provided without --export; enabling export mode.")
+        export = True
 
-    if save:
+    if export:
         win.show()
         app_qt.processEvents()
         resolved_out = _resolve_output_path(csv_path, out_path)

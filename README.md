@@ -227,6 +227,10 @@ python cli.py clock countdown 45			// 45 seconds
 python cli.py clock countdown 1 10		// 1 minute 10 seconds
 python cli.py clock countdown 1 0 1		// 1 hour and 1 second
 python cli.py clock countdown 2:15:00 -s xlarge -c magenta		// 2 hours 15 minutes
+
+# Mixed option placement (supported)
+python cli.py clock -s large countdown 1 10 -c magenta
+python cli.py clock countdown 1 10 -c magenta -s large
 ```
 
 - Press `Ctrl+C` to quit.
@@ -239,6 +243,7 @@ Notes:
 - When running `clock` without a subcommand, the live clock UI starts.
 - When running a subcommand (`timer`, `countdown`), the clock UI callback does not run.
 - The countdown holds at `00:00:00` until you press `Ctrl+C`.
+- For `clock`, place parent options before the subcommand; options after the subcommand are treated as subcommand options.
 
 ---
 
@@ -330,6 +335,12 @@ lf pdf ~/Desktop/report.pdf -q screen
 
 # Keep higher print quality and choose output path
 lf pdf ~/Desktop/report.pdf -q printer -o ~/Desktop/report_print.pdf
+
+# Option before positional
+lf pdf -q printer ~/Desktop/report.pdf
+
+# Option after positional (equivalent)
+lf pdf ~/Desktop/report.pdf -q printer
 ```
 
 Notes:
@@ -357,11 +368,12 @@ lf plot FILE [options]
 - `-d, --delimiter DELIM`: Force delimiter (auto-sniff if omitted across , \t ; | space).
 - `-t, --title TEXT`: Window title.
 - `-x, --xcol NAME|INDEX`: Column to use as X axis (time-like, numeric, or fallback to row indices). Default: first column.
+- `-s, --scale FLOAT`: Multiply plotted X values by this factor (default `1.0`). Useful for converting frame/sample index to time (numeric/index x-axis only).
 - `-y, --ycols COLS`: Comma-separated list of Y columns (names or indices). Default: all numeric except the chosen x column.
-- `--xlim start,end`: Row index slice (inclusive) before plotting. Accepts comma or colon: `--xlim 200,300` or `--xlim 200:300`. Empty start/end allowed (`,500` or `500,`).
-- `-s, --save`: Export a high‑resolution PNG (ImageExporter; independent of window size) next to the CSV (same basename) and exit. Env overrides: `PLOT_EXPORT_WIDTH`, `PLOT_EXPORT_PER_PLOT`.
+- `--xlim start,end`: Scaled x-value slice (inclusive) before plotting. Accepts comma or colon: `--xlim 10,20` or `--xlim 10:20`. Empty start/end allowed (`,20` or `10,`).
+- `-e, --export`: Export a high‑resolution PNG (ImageExporter; independent of window size) next to the CSV (same basename) and exit. Env overrides: `PLOT_EXPORT_WIDTH`, `PLOT_EXPORT_PER_PLOT`.
 - `-w, --weight FLOAT`: Width/size control (in pixels, default 1.0). In line mode it sets line width; in `--points-only` mode it sets marker size and marker outline width.
-- `-o, --out-path PATH`: Output PNG path or directory (implies `--save` if not explicitly provided). If a directory or ends with a path separator, the file name `<csv_basename>.png` is used. `.png` extension appended if missing.
+- `-o, --out-path PATH`: Output PNG path or directory (implies `--export` if not explicitly provided). If a directory or ends with a path separator, the file name `<csv_basename>.png` is used. `.png` extension appended if missing.
 
 **Automatic X-axis detection:**
 1. If selected x column parses as (mostly) datetimes or epoch seconds/milliseconds -> time axis (DateAxisItem).
@@ -372,10 +384,12 @@ lf plot FILE [options]
 - Columns with ≥ ~60% numeric entries qualify automatically (unless overridden with `--ycols`).
 - Non-numeric cells become gaps (NaN) in the plot.
 
-**Index trimming (`--xlim`):**
-- Applied to row indices, not data values or timestamps.
-- Example: `--xlim 1000,2000` keeps only rows 1000–2000 inclusive.
-- `--xlim ,500` keeps start through 500; `--xlim 500,` keeps 500 through end.
+**X-value trimming (`--xlim`):**
+- Applied to plotted x-axis values after `--scale` is applied.
+- Inclusive range filter: keep points where `xmin <= x <= xmax`.
+- If bounds exceed real data extents, they are clamped to available x min/max.
+- Example: with `-s 0.02`, `--xlim 27200,27500` clamps to data bounds when needed.
+- `--xlim ,20` keeps data from min x through 20; `--xlim 10,` keeps 10 through max x.
 
 **White Theme:**
 - Background forced to white; axes/text black; subtle grid (alpha 0.15).
@@ -392,17 +406,26 @@ lf plot ~/data/log.tsv -d $'\t' -t "Device Log"
 # Explicit x column by name and selected y columns
 lf plot data.csv -x timestamp -y temperature,pressure,3
 
-# Restrict to row indices 200..300
+# Restrict to x values 200..300 (after scaling, if -s is used)
 lf plot data.csv --xlim 200,300
 
-# Export a high-res PNG (no GUI)
-lf plot data.csv -y acc_x,acc_y,acc_z -s
+# Option before positional
+lf plot --xlim 200,300 data.csv
 
-# Export to a specific file path (auto-enables save mode)
+# Option after positional (equivalent)
+lf plot data.csv --xlim 200,300
+
+# Convert frame_id to seconds at 50 Hz (period = 0.02 s)
+lf plot data.csv -x frame_id -s 0.02 -y acc_x,acc_y,acc_z
+
+# Export a high-res PNG (no GUI)
+lf plot data.csv -y acc_x,acc_y,acc_z -e
+
+# Export to a specific file path (auto-enables export mode)
 lf plot data.csv -o ~/Desktop/plots/session1.png
 
 # Custom export size via environment
-PLOT_EXPORT_WIDTH=3000 PLOT_EXPORT_PER_PLOT=250 lf plot data.csv -s
+PLOT_EXPORT_WIDTH=3000 PLOT_EXPORT_PER_PLOT=250 lf plot data.csv -e
 
 # Thicker lines for visibility
 lf plot data.csv -y acc_x,acc_y,acc_z -w 2.5
@@ -418,8 +441,8 @@ Using x-axis: index (column: time[0])
 Y subplots: (6 / 17)
 Selected channels (6): acc_x[3], acc_y[4], acc_z[5], gyr_x[6], gyr_y[7], gyr_z[8]
 Unselected channels (11): temp[9], pressure[10], battery[11], state[12], ...
-Index trim -> kept indices [1000,1500] (501 points)
-Data points (x): [1000,1500] (501 / 6000 points selected)
+Data points (x): [20,30] (501 / 6000 points selected)
+--xlim [20,99] clamped to data range [20,30]
 Saved PNG: data.png (width=2400px, plots=6, line-width=2.5)
 ```
 Notes:
@@ -435,7 +458,7 @@ Notes:
 - `Esc`: Close the window and exit.
 
 **Other Behaviors:**
-- Supplying `--out-path` without `--save` prints a note and performs a save (no interactive session).
+- Supplying `--out-path` without `--export` prints a note and performs an export (no interactive session).
 - Rows with non-numeric Y values render gaps (NaN) in lines instead of aborting.
 
 **Planned (possible future additions):** trimmed-segment CSV export, interactive ROI selection, overlay/legend mode, optional scaled vector/SVG export.

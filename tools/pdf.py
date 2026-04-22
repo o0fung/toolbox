@@ -18,7 +18,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from tools._cli_output import fatal, info
 
 
-app = new_typer_app()
+app = new_typer_app(context_settings={"allow_interspersed_args": True})
 
 _QUALITY_TO_PDFSETTINGS = {
     "screen": "/screen",
