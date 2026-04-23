@@ -357,15 +357,17 @@ Notes:
 **Usage:**
 ```sh
 # From the repo
-python cli.py plot FILE [options]
+python cli.py plot [FILE] [options]
 
 # Installed entrypoint
-lf plot FILE [options]
+lf plot [FILE] [options]
 ```
 
 **Key Options:**
-- `FILE` (required): CSV/TSV file path.
+- `FILE` (required for plotting): CSV/TSV file path. Not required for `--config-show`, or for `--config` with no plotting.
 - `-d, --delimiter DELIM`: Force delimiter (auto-sniff if omitted across , \t ; | space).
+- `-c, --config`: Load default plot options from `~/.config/lf-toolbox/plot.defaults.json`. Explicit CLI flags override config values.
+- `--config-show`: Create/open `~/.config/lf-toolbox/plot.defaults.json` in your editor (or system opener) and exit.
 - `-t, --title TEXT`: Window title.
 - `-x, --xcol NAME|INDEX`: Column to use as X axis (time-like, numeric, or fallback to row indices). Default: first column.
 - `-s, --scale FLOAT`: Multiply plotted X values by this factor (default `1.0`). Useful for converting frame/sample index to time (numeric/index x-axis only).
@@ -374,6 +376,15 @@ lf plot FILE [options]
 - `-e, --export`: Export a high‑resolution PNG (ImageExporter; independent of window size) next to the CSV (same basename) and exit. Env overrides: `PLOT_EXPORT_WIDTH`, `PLOT_EXPORT_PER_PLOT`.
 - `-w, --weight FLOAT`: Width/size control (in pixels, default 1.0). In line mode it sets line width; in `--points-only` mode it sets marker size and marker outline width.
 - `-o, --out-path PATH`: Output PNG path or directory (implies `--export` if not explicitly provided). If a directory or ends with a path separator, the file name `<csv_basename>.png` is used. `.png` extension appended if missing.
+
+**Config file (`--config`)**
+- Supported keys: `delimiter`, `title`, `scale`, `export`, `out_path`, `xcol`, `ycols`, `xlim`, `weight`, `points_only`.
+- `xcol` accepts string or integer.
+- `ycols` accepts either comma-separated string (`"20,21,22"`) or a list (`[20, 21, 22]`).
+- Precedence: explicit CLI flags always win over config values.
+- Config path is fixed: `~/.config/lf-toolbox/plot.defaults.json`.
+- `--config-show` creates the file if missing, opens it for editing, then exits.
+- `--config` without `FILE` also opens the config file and exits.
 
 **Automatic X-axis detection:**
 1. If selected x column parses as (mostly) datetimes or epoch seconds/milliseconds -> time axis (DateAxisItem).
@@ -418,6 +429,18 @@ lf plot data.csv --xlim 200,300
 # Convert frame_id to seconds at 50 Hz (period = 0.02 s)
 lf plot data.csv -x frame_id -s 0.02 -y acc_x,acc_y,acc_z
 
+# First-time setup: create/open config, then edit and rerun
+lf plot --config-show
+
+# Quick edit flow (also opens config and exits)
+lf plot --config
+
+# Reuse defaults from fixed config path
+lf plot data.csv --config
+
+# Override one config value for a specific run
+lf plot data.csv --config -x 6
+
 # Export a high-res PNG (no GUI)
 lf plot data.csv -y acc_x,acc_y,acc_z -e
 
@@ -432,6 +455,15 @@ lf plot data.csv -y acc_x,acc_y,acc_z -w 2.5
 
 # Smaller points in points-only mode (weight controls marker size)
 lf plot data.csv --points-only -w 1
+```
+
+Example `~/.config/lf-toolbox/plot.defaults.json`:
+```json
+{
+  "xcol": 6,
+  "ycols": [20, 21, 22, 23, 24, 25, 11, 12, 14, 9, 10, 15, 16],
+  "scale": 0.02
+}
 ```
 
 **Console Output Summary:** (example)

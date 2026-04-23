@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import csv
+import json
 import math
 import os
+import shlex
+import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Tuple
 
+import click
 import typer
 from rich import print
 
@@ -27,6 +32,169 @@ except Exception:  # pragma: no cover - optional dependency
 
 
 app = new_typer_app(context_settings={"allow_interspersed_args": True})
+
+
+_CONFIG_OPTION_KEYS = {
+    "delimiter",
+    "title",
+    "scale",
+    "export",
+    "out_path",
+    "xcol",
+    "ycols",
+    "xlim",
+    "weight",
+    "points_only",
+}
+_DEFAULT_PLOT_CONFIG_PATH = os.path.expanduser("~/.config/lf-toolbox/plot.defaults.json")
+
+
+def _default_plot_config_payload() -> Dict[str, object]:
+    return {
+        "delimiter": None,
+        "title": None,
+        "scale": 1.0,
+        "export": False,
+        "out_path": None,
+        "xcol": None,
+        "ycols": None,
+        "xlim": None,
+        "weight": 1.0,
+        "points_only": False,
+    }
+
+
+def _ensure_plot_config_file(path: str) -> bool:
+    expanded_path = os.path.expanduser(path)
+    if os.path.isfile(expanded_path):
+        return False
+
+    parent = os.path.dirname(expanded_path) or "."
+    try:
+        os.makedirs(parent, exist_ok=True)
+    except OSError as exc:
+        raise typer.BadParameter(f"Cannot create config directory '{parent}': {exc}") from exc
+
+    try:
+        with open(expanded_path, "w", encoding="utf-8") as handle:
+            json.dump(_default_plot_config_payload(), handle, indent=2)
+            handle.write("\n")
+    except OSError as exc:
+        raise typer.BadParameter(f"Cannot write config file '{expanded_path}': {exc}") from exc
+    return True
+
+
+def _open_path_for_edit(path: str) -> None:
+    expanded_path = os.path.expanduser(path)
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    try:
+        if editor:
+            editor_cmd = shlex.split(editor)
+            if not editor_cmd:
+                raise typer.BadParameter("EDITOR/VISUAL is set but empty")
+            subprocess.Popen([*editor_cmd, expanded_path])
+            return
+
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", expanded_path])
+            return
+        if os.name == "nt":
+            os.startfile(expanded_path)  # type: ignore[attr-defined]
+            return
+
+        subprocess.Popen(["xdg-open", expanded_path])
+    except OSError as exc:
+        raise typer.BadParameter(f"Cannot open config file '{expanded_path}': {exc}") from exc
+
+
+def _normalize_plot_config_value(key: str, value: object) -> object:
+    optional_str_keys = {"delimiter", "title", "out_path", "xlim"}
+    if key in optional_str_keys:
+        if value is None or isinstance(value, str):
+            return value
+        raise typer.BadParameter(f"Config key '{key}' must be a string or null")
+
+    if key == "xcol":
+        if isinstance(value, str):
+            return value
+        if isinstance(value, int) and not isinstance(value, bool):
+            return str(value)
+        raise typer.BadParameter("Config key 'xcol' must be a string or integer")
+
+    if key == "ycols":
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            tokens: List[str] = []
+            for idx, token in enumerate(value):
+                if isinstance(token, str):
+                    normalized = token.strip()
+                elif isinstance(token, int) and not isinstance(token, bool):
+                    normalized = str(token)
+                else:
+                    raise typer.BadParameter(
+                        f"Config key 'ycols' list item at index {idx} must be a string or integer"
+                    )
+                if normalized:
+                    tokens.append(normalized)
+            return ",".join(tokens)
+        raise typer.BadParameter("Config key 'ycols' must be a string or list")
+
+    if key in {"export", "points_only"}:
+        if isinstance(value, bool):
+            return value
+        raise typer.BadParameter(f"Config key '{key}' must be a boolean")
+
+    if key in {"scale", "weight"}:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        raise typer.BadParameter(f"Config key '{key}' must be a number")
+
+    raise typer.BadParameter(f"Unsupported config key: {key}")
+
+
+def _load_plot_config(path: str) -> Dict[str, object]:
+    expanded_path = os.path.expanduser(path)
+    if not os.path.isfile(expanded_path):
+        raise typer.BadParameter(f"Config file not found: {expanded_path}")
+
+    try:
+        with open(expanded_path, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(f"Invalid JSON in config file '{expanded_path}': {exc.msg}") from exc
+    except OSError as exc:
+        raise typer.BadParameter(f"Cannot read config file '{expanded_path}': {exc}") from exc
+
+    if not isinstance(loaded, dict):
+        raise typer.BadParameter("Config file root must be a JSON object")
+
+    unknown_keys = sorted(set(loaded.keys()) - _CONFIG_OPTION_KEYS)
+    if unknown_keys:
+        raise typer.BadParameter(f"Unsupported config keys: {', '.join(unknown_keys)}")
+
+    normalized: Dict[str, object] = {}
+    for key, value in loaded.items():
+        normalized[key] = _normalize_plot_config_value(key, value)
+    return normalized
+
+
+def _merge_plot_options(
+    cli_values: Dict[str, object],
+    config_values: Dict[str, object],
+    cli_explicit_keys: Iterable[str],
+) -> Dict[str, object]:
+    # Merge precedence is order-sensitive:
+    # 1) start with Typer-resolved runtime values (defaults + CLI),
+    # 2) apply config values only for options that were not explicitly passed,
+    # 3) preserve explicit CLI entries so one-off overrides always win.
+    merged = dict(cli_values)
+    explicit = set(cli_explicit_keys)
+    for key, value in config_values.items():
+        if key in explicit:
+            continue
+        merged[key] = value
+    return merged
 
 
 @dataclass
@@ -299,7 +467,18 @@ def _format_x_value(x_value: float, x_kind: str) -> str:
 
 @app.callback()
 def plot(
-    csv_path: str = typer.Argument(..., help="Path to CSV file"),
+    csv_path: Optional[str] = typer.Argument(None, help="Path to CSV file (optional for --config/--config-show)."),
+    config: bool = typer.Option(
+        False,
+        "-c",
+        "--config",
+        help="Load defaults from ~/.config/lf-toolbox/plot.defaults.json. Explicit CLI flags override config values.",
+    ),
+    config_show: bool = typer.Option(
+        False,
+        "--config-show",
+        help="Create/open ~/.config/lf-toolbox/plot.defaults.json in your editor and exit.",
+    ),
     delimiter: Optional[str] = typer.Option(None, "-d", "--delimiter", help="CSV delimiter (auto if omitted)"),
     title: Optional[str] = typer.Option(None, "-t", "--title", help="Window title"),
     scale: float = typer.Option(
@@ -331,6 +510,79 @@ def plot(
     points_only: bool = typer.Option(False, "-p", "--points-only", help="Plot points only (no connecting line)."),
 ) -> None:
     """Plot CSV columns using pyqtgraph with subplots per data column."""
+    option_names = [
+        "delimiter",
+        "title",
+        "scale",
+        "export",
+        "out_path",
+        "xcol",
+        "ycols",
+        "xlim",
+        "weight",
+        "points_only",
+    ]
+    cli_values: Dict[str, object] = {
+        "delimiter": delimiter,
+        "title": title,
+        "scale": scale,
+        "export": export,
+        "out_path": out_path,
+        "xcol": xcol,
+        "ycols": ycols,
+        "xlim": xlim,
+        "weight": weight,
+        "points_only": points_only,
+    }
+
+    # Config mode has two explicit states:
+    # 1) --config-show always ensures + opens the default file, then exits.
+    # 2) --config loads defaults from that file only when plotting is requested.
+    # This ordering keeps edit-first workflow predictable and avoids accidental
+    # plotting when the user's intent is to modify presets.
+    if config_show:
+        created = _ensure_plot_config_file(_DEFAULT_PLOT_CONFIG_PATH)
+        if created:
+            print(f"[green]Created default plot config[/green]: {_DEFAULT_PLOT_CONFIG_PATH}")
+        _open_path_for_edit(_DEFAULT_PLOT_CONFIG_PATH)
+        print(f"Opened plot config: {_DEFAULT_PLOT_CONFIG_PATH}")
+        raise typer.Exit()
+
+    if config and csv_path is None:
+        created = _ensure_plot_config_file(_DEFAULT_PLOT_CONFIG_PATH)
+        if created:
+            print(f"[green]Created default plot config[/green]: {_DEFAULT_PLOT_CONFIG_PATH}")
+        _open_path_for_edit(_DEFAULT_PLOT_CONFIG_PATH)
+        print(f"Opened plot config: {_DEFAULT_PLOT_CONFIG_PATH}")
+        raise typer.Exit()
+
+    if config:
+        _ensure_plot_config_file(_DEFAULT_PLOT_CONFIG_PATH)
+        click_ctx = click.get_current_context(silent=True)
+        explicit_keys: set[str] = set()
+        if click_ctx is not None:
+            for name in option_names:
+                source = click_ctx.get_parameter_source(name)
+                if source == click.core.ParameterSource.COMMANDLINE:
+                    explicit_keys.add(name)
+
+        config_values = _load_plot_config(_DEFAULT_PLOT_CONFIG_PATH)
+        merged = _merge_plot_options(cli_values, config_values, explicit_keys)
+        delimiter = merged["delimiter"]  # type: ignore[assignment]
+        title = merged["title"]  # type: ignore[assignment]
+        scale = merged["scale"]  # type: ignore[assignment]
+        export = merged["export"]  # type: ignore[assignment]
+        out_path = merged["out_path"]  # type: ignore[assignment]
+        xcol = merged["xcol"]  # type: ignore[assignment]
+        ycols = merged["ycols"]  # type: ignore[assignment]
+        xlim = merged["xlim"]  # type: ignore[assignment]
+        weight = merged["weight"]  # type: ignore[assignment]
+        points_only = merged["points_only"]  # type: ignore[assignment]
+        print(f"Loaded plot config: {_DEFAULT_PLOT_CONFIG_PATH}")
+
+    if csv_path is None:
+        raise typer.BadParameter("FILE is required unless --config or --config-show is used.")
+
     data = _read_csv(csv_path, delimiter)
     ncols = max(len(row) for row in data.rows) if data.rows else 0
 

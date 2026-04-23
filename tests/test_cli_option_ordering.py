@@ -45,6 +45,45 @@ class CallbackOptionOrderingPhaseOneTests(unittest.TestCase):
         self.assertEqual(after_ctx.params["xlim"], "1,2")
         self.assertEqual(after_ctx.args, [])
 
+    def test_plot_accepts_boolean_config_option_before_or_after_csv_argument(self) -> None:
+        command = get_command(plot.app)
+        before_ctx = _group_context(command, ["--config", "/tmp/data.csv"])
+        after_ctx = _group_context(command, ["/tmp/data.csv", "--config"])
+
+        self.assertEqual(before_ctx.params["csv_path"], "/tmp/data.csv")
+        self.assertTrue(before_ctx.params["config"])
+        self.assertEqual(before_ctx.args, [])
+
+        self.assertEqual(after_ctx.params["csv_path"], "/tmp/data.csv")
+        self.assertTrue(after_ctx.params["config"])
+        self.assertEqual(after_ctx.args, [])
+
+    def test_plot_accepts_config_show_option_before_or_after_csv_argument(self) -> None:
+        command = get_command(plot.app)
+        before_ctx = _group_context(command, ["--config-show", "/tmp/data.csv"])
+        after_ctx = _group_context(command, ["/tmp/data.csv", "--config-show"])
+
+        self.assertEqual(before_ctx.params["csv_path"], "/tmp/data.csv")
+        self.assertTrue(before_ctx.params["config_show"])
+        self.assertEqual(before_ctx.args, [])
+
+        self.assertEqual(after_ctx.params["csv_path"], "/tmp/data.csv")
+        self.assertTrue(after_ctx.params["config_show"])
+        self.assertEqual(after_ctx.args, [])
+
+    def test_plot_allows_config_or_config_show_without_csv_argument(self) -> None:
+        command = get_command(plot.app)
+        config_ctx = _group_context(command, ["--config"])
+        show_ctx = _group_context(command, ["--config-show"])
+
+        self.assertIsNone(config_ctx.params["csv_path"])
+        self.assertTrue(config_ctx.params["config"])
+        self.assertEqual(config_ctx.args, [])
+
+        self.assertIsNone(show_ctx.params["csv_path"])
+        self.assertTrue(show_ctx.params["config_show"])
+        self.assertEqual(show_ctx.args, [])
+
     def test_pdf_accepts_option_after_input_argument(self) -> None:
         command = get_command(pdf.app)
         before_ctx = _group_context(command, ["-q", "screen", "/tmp/in.pdf"])
