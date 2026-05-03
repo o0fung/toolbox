@@ -31,7 +31,7 @@ except Exception:  # pragma: no cover - optional dependency
     dateparser = None
 
 
-app = new_typer_app(context_settings={"allow_interspersed_args": True})
+app = new_typer_app(context_settings={"allow_interspersed_args": True}, invoke_without_command=True)
 
 
 _CONFIG_OPTION_KEYS = {
