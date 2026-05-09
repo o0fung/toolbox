@@ -69,7 +69,7 @@ def pdf(
         raise typer.BadParameter(f"Invalid --quality '{quality}'. Choose from: {allowed}")
 
     output_path = _resolve_output_path(input_path, out)
-    if output_path.resolve() == input_path:
+    if _paths_refer_to_same_file(input_path, output_path):
         raise typer.BadParameter("Output path must be different from input path.")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -124,6 +124,18 @@ def _resolve_output_path(input_path: Path, out: Optional[Path]) -> Path:
     if candidate.suffix.lower() != ".pdf":
         return candidate.with_suffix(".pdf")
     return candidate
+
+
+def _paths_refer_to_same_file(input_path: Path, output_path: Path) -> bool:
+    # Protect the source PDF before Ghostscript opens the output for writing.
+    # String-resolved paths catch spelling/symlink equivalence for missing outputs;
+    # samefile catches existing hard links that share the input inode.
+    if output_path.resolve() == input_path:
+        return True
+    try:
+        return input_path.samefile(output_path)
+    except OSError:
+        return False
 
 
 def _human_size(num_bytes: int) -> str:
