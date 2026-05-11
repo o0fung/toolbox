@@ -49,6 +49,11 @@ class PlotToolTests(unittest.TestCase):
         with self.assertRaises(typer.BadParameter):
             plot._parse_xlim("5,1")
 
+    def test_format_delta_value_for_signed_and_non_finite_values(self) -> None:
+        self.assertEqual(plot._format_delta_value(1.25), "+1.25")
+        self.assertEqual(plot._format_delta_value(-0.5, "s"), "-0.5s")
+        self.assertEqual(plot._format_delta_value(float("nan")), "nan")
+
     def test_filter_scaled_xlim_clamps_to_data_bounds(self) -> None:
         xs = [0.0, 1.0, 2.0, 3.0]
         ycols = [(1, "signal", [10.0, 11.0, 12.0, 13.0])]
@@ -93,6 +98,31 @@ class PlotToolTests(unittest.TestCase):
         self.assertEqual(loaded["xcol"], "6")
         self.assertEqual(loaded["ycols"], "20,21,22")
         self.assertEqual(loaded["xlim"], "10,20")
+
+    def test_load_plot_config_accepts_null_xcol_and_ycols(self) -> None:
+        path = self._write_temp_json({"xcol": None, "ycols": None, "scale": 1.0})
+        try:
+            loaded = plot._load_plot_config(path)
+        finally:
+            os.unlink(path)
+
+        self.assertIsNone(loaded["xcol"])
+        self.assertIsNone(loaded["ycols"])
+
+    def test_load_plot_config_rejects_invalid_xcol_and_ycols_types(self) -> None:
+        xcol_path = self._write_temp_json({"xcol": {"bad": "type"}})
+        try:
+            with self.assertRaises(typer.BadParameter):
+                plot._load_plot_config(xcol_path)
+        finally:
+            os.unlink(xcol_path)
+
+        ycols_path = self._write_temp_json({"ycols": 123.45})
+        try:
+            with self.assertRaises(typer.BadParameter):
+                plot._load_plot_config(ycols_path)
+        finally:
+            os.unlink(ycols_path)
 
     def test_load_plot_config_rejects_missing_file(self) -> None:
         with self.assertRaises(typer.BadParameter):

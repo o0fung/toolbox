@@ -115,13 +115,17 @@ def _normalize_plot_config_value(key: str, value: object) -> object:
         raise typer.BadParameter(f"Config key '{key}' must be a string or null")
 
     if key == "xcol":
+        if value is None:
+            return None
         if isinstance(value, str):
             return value
         if isinstance(value, int) and not isinstance(value, bool):
             return str(value)
-        raise typer.BadParameter("Config key 'xcol' must be a string or integer")
+        raise typer.BadParameter("Config key 'xcol' must be a string, integer, or null")
 
     if key == "ycols":
+        if value is None:
+            return None
         if isinstance(value, str):
             return value
         if isinstance(value, list):
@@ -138,7 +142,7 @@ def _normalize_plot_config_value(key: str, value: object) -> object:
                 if normalized:
                     tokens.append(normalized)
             return ",".join(tokens)
-        raise typer.BadParameter("Config key 'ycols' must be a string or list")
+        raise typer.BadParameter("Config key 'ycols' must be a string, list, or null")
 
     if key in {"export", "points_only"}:
         if isinstance(value, bool):
@@ -465,6 +469,12 @@ def _format_x_value(x_value: float, x_kind: str) -> str:
     return f"{x_value:.6g}"
 
 
+def _format_delta_value(delta_value: float, suffix: str = "") -> str:
+    if not math.isfinite(delta_value):
+        return "nan"
+    return f"{delta_value:+.6g}{suffix}"
+
+
 @app.callback()
 def plot(
     csv_path: Optional[str] = typer.Argument(None, help="Path to CSV file (optional for --config/--config-show)."),
@@ -687,9 +697,10 @@ def plot(
     pg.setConfigOption("background", (255, 255, 255))
     pg.setConfigOption("foreground", (0, 0, 0))
 
+    nplots = len(ycols_list)
     win = pg.GraphicsLayoutWidget()
     win.setWindowTitle(title or f"CSV Plot - {os.path.basename(csv_path)}")
-    win.resize(1000, 800)
+    win.resize(1000, max(800, 240 * nplots))
 
     try:
         pal = win.palette()
@@ -714,12 +725,13 @@ def plot(
         (156, 39, 176),
         (0, 121, 107),
     ]
+    zero_line_pen = pg.mkPen(color=(40, 40, 40, 90), width=1)
 
     first_plot = None
     plot_items: List[object] = []
     subplot_red_labels: List[object] = []
+    subplot_delta_labels: List[object] = []
     subplot_blue_labels: List[object] = []
-    nplots = len(ycols_list)
     render_mode = "points-only" if points_only else "line"
 
     # Keep subplot labels pinned to stable corners across zoom/pan.
@@ -731,6 +743,7 @@ def plot(
         plot_item: object,
         name_label_item: object,
         red_label_item: object,
+        delta_label_item: object,
         blue_label_item: object,
     ) -> None:
         try:
@@ -744,10 +757,11 @@ def plot(
         x_span = x_max - x_min
         y_span = y_max - y_min
         x_pad = (x_span * 0.02) if x_span > 0 else 1.0
-        y_pad = (y_span * 0.05) if y_span > 0 else 1.0
+        y_pad = (y_span * 0.08) if y_span > 0 else 1.0
         name_label_item.setPos(x_min + x_pad, y_max - y_pad)
         red_label_item.setPos(x_max - x_pad, y_max - y_pad)
-        blue_label_item.setPos(x_max - x_pad, y_min + y_pad)
+        blue_label_item.setPos(x_max - x_pad, y_min + (y_span * 0.5))
+        delta_label_item.setPos(x_max - x_pad, y_min + y_pad)
 
     for i, (_idx, name, ys) in enumerate(ycols_list):
         is_last = i == nplots - 1
@@ -762,23 +776,30 @@ def plot(
             plot_item.getAxis("bottom").setTextPen("k")
         except Exception:
             pass
+        zero_line = pg.InfiniteLine(pos=0, angle=0, movable=False, pen=zero_line_pen)
+        zero_line.setZValue(-100)
+        plot_item.addItem(zero_line)
 
         series_label = pg.TextItem(text=name, anchor=(0, 0), color=(0, 0, 0))
         series_label.setZValue(1100)
         red_marker_label = pg.TextItem(text="", anchor=(1, 0), color=(220, 20, 60))
         red_marker_label.setZValue(1101)
-        blue_marker_label = pg.TextItem(text="", anchor=(1, 1), color=(25, 118, 210))
+        delta_marker_label = pg.TextItem(text="", anchor=(1, 1), color=(38, 38, 38))
+        delta_marker_label.setZValue(1101)
+        blue_marker_label = pg.TextItem(text="", anchor=(1, 0.5), color=(25, 118, 210))
         blue_marker_label.setZValue(1101)
         # Keep corner labels out of auto-range bounds; otherwise range updates
         # can recursively expand limits while labels are re-anchored each frame.
         plot_item.addItem(series_label, ignoreBounds=True)
         plot_item.addItem(red_marker_label, ignoreBounds=True)
+        plot_item.addItem(delta_marker_label, ignoreBounds=True)
         plot_item.addItem(blue_marker_label, ignoreBounds=True)
         plot_item.vb.sigRangeChanged.connect(
-            lambda *_args, item=plot_item, name_item=series_label, red_item=red_marker_label, blue_item=blue_marker_label: _position_subplot_labels(
+            lambda *_args, item=plot_item, name_item=series_label, red_item=red_marker_label, delta_item=delta_marker_label, blue_item=blue_marker_label: _position_subplot_labels(
                 item,
                 name_item,
                 red_item,
+                delta_item,
                 blue_item,
             )
         )
@@ -813,11 +834,12 @@ def plot(
             )
         else:
             plot_item.plot(xs, ys, pen=pg.mkPen(color=color, width=weight))
-        _position_subplot_labels(plot_item, series_label, red_marker_label, blue_marker_label)
+        _position_subplot_labels(plot_item, series_label, red_marker_label, delta_marker_label, blue_marker_label)
         if first_plot is None:
             first_plot = plot_item
         plot_items.append(plot_item)
         subplot_red_labels.append(red_marker_label)
+        subplot_delta_labels.append(delta_marker_label)
         subplot_blue_labels.append(blue_marker_label)
 
     app_qt.processEvents()
@@ -840,14 +862,14 @@ def plot(
         target_item = getattr(win, "ci", None) or first_plot
         exporter = ImageExporter(target_item)
         width_env = os.environ.get("PLOT_EXPORT_WIDTH", "2400")
-        per_plot_env = os.environ.get("PLOT_EXPORT_PER_PLOT", "210")
+        per_plot_env = os.environ.get("PLOT_EXPORT_PER_PLOT", "240")
         try:
             width_px = int(width_env)
             per_plot_height = int(per_plot_env)
         except ValueError:
-            warn("PLOT_EXPORT_WIDTH or PLOT_EXPORT_PER_PLOT invalid; using defaults (2400, 210)")
+            warn("PLOT_EXPORT_WIDTH or PLOT_EXPORT_PER_PLOT invalid; using defaults (2400, 240)")
             width_px = 2400
-            per_plot_height = 210
+            per_plot_height = 240
 
         exporter.parameters()["width"] = width_px
         exporter.parameters()["height"] = max(600, per_plot_height * nplots)
@@ -871,10 +893,14 @@ def plot(
             "left": {
                 "color": (220, 20, 60),
                 "lines": [],
+                "x": math.nan,
+                "y_values": [math.nan] * nplots,
             },
             "right": {
                 "color": (25, 118, 210),
                 "lines": [],
+                "x": math.nan,
+                "y_values": [math.nan] * nplots,
             },
         }
 
@@ -908,12 +934,14 @@ def plot(
             lines = state["lines"]
             x_display = _format_x_value(clicked_x, x_kind)
             channel_labels = subplot_red_labels if channel == "left" else subplot_blue_labels
-            channel_name = "red line" if channel == "left" else "blue line"
+            channel_y_values = state["y_values"]
+            state["x"] = clicked_x
 
             # Marker updates are channel-specific:
             # - move the selected channel's vertical lines on all subplots,
             # - refresh only that corner label (top-right red / bottom-right blue),
             # - preserve the opposite channel label text until that channel updates.
+            # Then refresh the delta line only when both channels are available.
             for idx, plot_item in enumerate(plot_items):
                 lines[idx].setPos(clicked_x)
 
@@ -924,8 +952,24 @@ def plot(
                 else:
                     y_value = ys[nearest_idx]
 
+                channel_y_values[idx] = y_value
                 y_display = "nan" if not math.isfinite(y_value) else f"{y_value:.6g}"
-                channel_labels[idx].setText(f"{channel_name}: {y_display} @ x={x_display}")
+                channel_labels[idx].setText(f"{y_display} @ x={x_display}")
+
+                left_state = marker_state["left"]
+                right_state = marker_state["right"]
+                left_x = left_state["x"]
+                right_x = right_state["x"]
+                left_y = left_state["y_values"][idx]
+                right_y = right_state["y_values"][idx]
+
+                if all(math.isfinite(value) for value in (left_x, right_x, left_y, right_y)):
+                    delta_y_display = _format_delta_value(right_y - left_y)
+                    delta_x_suffix = "s" if x_kind == "time" else ""
+                    delta_x_display = _format_delta_value(right_x - left_x, delta_x_suffix)
+                    subplot_delta_labels[idx].setText(f"Δy={delta_y_display}, Δx={delta_x_display}")
+                else:
+                    subplot_delta_labels[idx].setText("")
 
         def _on_scene_click(event: object) -> None:
             try:
