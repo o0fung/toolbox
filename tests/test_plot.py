@@ -187,6 +187,15 @@ class PlotToolTests(unittest.TestCase):
         self.assertEqual(loaded["scale"], 1.0)
         self.assertIsNone(loaded["ycols"])
 
+    def test_default_generated_config_is_loadable(self) -> None:
+        created = plot._ensure_plot_config_file(plot._DEFAULT_PLOT_CONFIG_PATH)
+        self.assertTrue(created)
+
+        loaded = plot._load_plot_config(plot._DEFAULT_PLOT_CONFIG_PATH)
+        self.assertIsNone(loaded["xcol"])
+        self.assertIsNone(loaded["ycols"])
+        self.assertEqual(loaded["scale"], 1.0)
+
     def test_ensure_plot_config_file_does_not_overwrite_existing_file(self) -> None:
         with open(plot._DEFAULT_PLOT_CONFIG_PATH, "w", encoding="utf-8") as handle:
             json.dump({"scale": 0.02}, handle)
