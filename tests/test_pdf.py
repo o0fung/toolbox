@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -23,6 +25,18 @@ class PdfToolTests(unittest.TestCase):
         input_path = Path("/tmp/sample.pdf")
         resolved = pdf._resolve_output_path(input_path, Path("/tmp/out/report"))
         self.assertEqual(str(resolved), "/tmp/out/report.pdf")
+
+    def test_paths_refer_to_same_file_detects_hard_link(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            input_path = Path(tmp_dir) / "input.pdf"
+            linked_output = Path(tmp_dir) / "linked-output.pdf"
+            input_path.write_bytes(b"%PDF-1.4\n")
+            try:
+                os.link(input_path, linked_output)
+            except (AttributeError, NotImplementedError, OSError) as exc:
+                self.skipTest(f"hard links are unavailable: {exc}")
+
+            self.assertTrue(pdf._paths_refer_to_same_file(input_path.resolve(), linked_output))
 
     def test_human_size_units(self) -> None:
         self.assertEqual(pdf._human_size(512), "512.0B")
