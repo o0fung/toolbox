@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -74,6 +75,8 @@ def pdf(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    temp_output_path = _temporary_output_path(output_path)
+
     command = [
         gs_exe,
         "-sDEVICE=pdfwrite",
@@ -85,22 +88,30 @@ def pdf(
         "-dDetectDuplicateImages=true",
         "-dCompressFonts=true",
         "-dSubsetFonts=true",
-        f"-sOutputFile={str(output_path)}",
+        f"-sOutputFile={str(temp_output_path)}",
         str(input_path),
     ]
 
     # Compression flow:
-    # 1) Run Ghostscript once with selected quality profile.
-    # 2) Surface stderr context on failures to make terminal debugging practical.
-    # 3) Report before/after size and reduction ratio for quick verification.
+    # 1) Write Ghostscript output to a temp file beside the final target.
+    # 2) Surface stderr context on failures while preserving any existing output.
+    # 3) Atomically replace the target only after Ghostscript succeeds.
     try:
         result = subprocess.run(command, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as exc:
+        _remove_temp_output_path(temp_output_path)
         stderr = (exc.stderr or "").strip()
         detail = f" Ghostscript error: {stderr}" if stderr else ""
         fatal(f"PDF compression failed.{detail}")
     except Exception as exc:
+        _remove_temp_output_path(temp_output_path)
         fatal(f"Failed to execute Ghostscript: {exc}")
+
+    try:
+        temp_output_path.replace(output_path)
+    except Exception as exc:
+        _remove_temp_output_path(temp_output_path)
+        fatal(f"Failed to finalize compressed PDF: {exc}")
 
     _ = result
     before_bytes = input_path.stat().st_size
@@ -124,6 +135,23 @@ def _resolve_output_path(input_path: Path, out: Optional[Path]) -> Path:
     if candidate.suffix.lower() != ".pdf":
         return candidate.with_suffix(".pdf")
     return candidate
+
+
+def _temporary_output_path(output_path: Path) -> Path:
+    with tempfile.NamedTemporaryFile(
+        prefix=f".{output_path.name}.",
+        suffix=".tmp",
+        dir=output_path.parent,
+        delete=False,
+    ) as handle:
+        return Path(handle.name)
+
+
+def _remove_temp_output_path(temp_output_path: Path) -> None:
+    try:
+        temp_output_path.unlink()
+    except FileNotFoundError:
+        return
 
 
 def _human_size(num_bytes: int) -> str:
