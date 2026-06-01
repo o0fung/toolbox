@@ -36,7 +36,7 @@ def pdf(
         None,
         "-o",
         "--out",
-        help="Output PDF path. Default: <input_stem>_compressed.pdf in the same folder.",
+        help="Output PDF path or directory. Default: <input_stem>_compressed.pdf in the same folder.",
     ),
     quality: str = typer.Option(
         "ebook",
@@ -121,6 +121,8 @@ def _resolve_output_path(input_path: Path, out: Optional[Path]) -> Path:
         return input_path.with_name(f"{input_path.stem}_compressed.pdf")
 
     candidate = out.expanduser()
+    if candidate.is_dir():
+        return candidate / f"{input_path.stem}_compressed.pdf"
     if candidate.suffix.lower() != ".pdf":
         return candidate.with_suffix(".pdf")
     return candidate
