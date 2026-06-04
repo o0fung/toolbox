@@ -178,6 +178,57 @@ class PlotToolTests(unittest.TestCase):
         self.assertEqual(merged["xcol"], "6")
         self.assertEqual(merged["ycols"], "20,21,22")
 
+    def test_root_cli_config_preserves_explicit_output_and_scaling_flags(self) -> None:
+        from cli import app as root_app
+
+        config_out = os.path.join(self._temp_dir.name, "from-config.png")
+        explicit_out = os.path.join(self._temp_dir.name, "explicit.png")
+        with open(plot._DEFAULT_PLOT_CONFIG_PATH, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "scale": 0.5,
+                    "out_path": config_out,
+                    "xlim": "0,1",
+                    "export": True,
+                },
+                handle,
+            )
+
+        observed: dict[str, object] = {}
+        original_merge = plot._merge_plot_options
+
+        def spy_merge(cli_values, config_values, explicit_keys):
+            merged = original_merge(cli_values, config_values, explicit_keys)
+            observed["explicit_keys"] = set(explicit_keys)
+            observed["merged"] = merged
+            raise RuntimeError("stop after config merge")
+
+        runner = CliRunner()
+        with patch("tools.plot._merge_plot_options", side_effect=spy_merge):
+            result = runner.invoke(
+                root_app,
+                [
+                    "plot",
+                    "data.csv",
+                    "--config",
+                    "-s",
+                    "2",
+                    "--out-path",
+                    explicit_out,
+                    "--xlim",
+                    "2,6",
+                ],
+            )
+
+        self.assertIsInstance(result.exception, RuntimeError)
+        self.assertEqual(str(result.exception), "stop after config merge")
+        self.assertEqual(observed["explicit_keys"], {"scale", "out_path", "xlim"})
+        merged = observed["merged"]
+        self.assertEqual(merged["scale"], 2.0)
+        self.assertEqual(merged["out_path"], explicit_out)
+        self.assertEqual(merged["xlim"], "2,6")
+        self.assertTrue(merged["export"])
+
     def test_ensure_plot_config_file_creates_default_payload(self) -> None:
         created = plot._ensure_plot_config_file(plot._DEFAULT_PLOT_CONFIG_PATH)
         self.assertTrue(created)

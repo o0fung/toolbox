@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Tuple
 
-import click
 import typer
 from rich import print
 
@@ -199,6 +198,13 @@ def _merge_plot_options(
             continue
         merged[key] = value
     return merged
+
+
+def _is_commandline_parameter_source(source: object) -> bool:
+    # Typer can provide its vendored Click enum while external Click provides a
+    # separate enum class. Compare by semantic name so explicit CLI flags keep
+    # precedence regardless of which Click implementation created the context.
+    return getattr(source, "name", None) == "COMMANDLINE"
 
 
 @dataclass
@@ -477,6 +483,7 @@ def _format_delta_value(delta_value: float, suffix: str = "") -> str:
 
 @app.callback()
 def plot(
+    ctx: typer.Context,
     csv_path: Optional[str] = typer.Argument(None, help="Path to CSV file (optional for --config/--config-show)."),
     config: bool = typer.Option(
         False,
@@ -568,13 +575,11 @@ def plot(
 
     if config:
         _ensure_plot_config_file(_DEFAULT_PLOT_CONFIG_PATH)
-        click_ctx = click.get_current_context(silent=True)
         explicit_keys: set[str] = set()
-        if click_ctx is not None:
-            for name in option_names:
-                source = click_ctx.get_parameter_source(name)
-                if source == click.core.ParameterSource.COMMANDLINE:
-                    explicit_keys.add(name)
+        for name in option_names:
+            source = ctx.get_parameter_source(name)
+            if _is_commandline_parameter_source(source):
+                explicit_keys.add(name)
 
         config_values = _load_plot_config(_DEFAULT_PLOT_CONFIG_PATH)
         merged = _merge_plot_options(cli_values, config_values, explicit_keys)
