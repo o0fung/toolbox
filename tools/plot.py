@@ -201,6 +201,10 @@ def _merge_plot_options(
     return merged
 
 
+def _should_enable_export_for_out_path(out_path: Optional[str], export: bool, out_path_from_cli: bool) -> bool:
+    return out_path is not None and not export and out_path_from_cli
+
+
 @dataclass
 class ParsedCSV:
     headers: List[str]
@@ -544,6 +548,7 @@ def plot(
         "weight": weight,
         "points_only": points_only,
     }
+    out_path_from_cli = out_path is not None
 
     # Config mode has two explicit states:
     # 1) --config-show always ensures + opens the default file, then exits.
@@ -844,7 +849,7 @@ def plot(
 
     app_qt.processEvents()
 
-    if out_path is not None and not export:
+    if _should_enable_export_for_out_path(out_path, export, out_path_from_cli):
         warn("--out-path provided without --export; enabling export mode.")
         export = True
 

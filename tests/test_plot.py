@@ -178,6 +178,41 @@ class PlotToolTests(unittest.TestCase):
         self.assertEqual(merged["xcol"], "6")
         self.assertEqual(merged["ycols"], "20,21,22")
 
+    def test_out_path_implies_export_only_when_cli_provided_it(self) -> None:
+        self.assertTrue(plot._should_enable_export_for_out_path("plot.png", False, True))
+        self.assertFalse(plot._should_enable_export_for_out_path("plot.png", False, False))
+        self.assertFalse(plot._should_enable_export_for_out_path("plot.png", True, True))
+        self.assertFalse(plot._should_enable_export_for_out_path(None, False, True))
+
+    def test_config_out_path_and_export_false_do_not_force_export(self) -> None:
+        cli_values = {
+            "delimiter": None,
+            "title": None,
+            "scale": 1.0,
+            "export": False,
+            "out_path": None,
+            "xcol": None,
+            "ycols": None,
+            "xlim": None,
+            "weight": 1.0,
+            "points_only": False,
+        }
+        merged = plot._merge_plot_options(
+            cli_values,
+            {"out_path": "from-config.png", "export": False},
+            set(),
+        )
+
+        self.assertFalse(merged["export"])
+        self.assertEqual(merged["out_path"], "from-config.png")
+        self.assertFalse(
+            plot._should_enable_export_for_out_path(
+                merged["out_path"],  # type: ignore[arg-type]
+                merged["export"],  # type: ignore[arg-type]
+                out_path_from_cli=False,
+            )
+        )
+
     def test_ensure_plot_config_file_creates_default_payload(self) -> None:
         created = plot._ensure_plot_config_file(plot._DEFAULT_PLOT_CONFIG_PATH)
         self.assertTrue(created)
