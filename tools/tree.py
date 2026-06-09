@@ -119,7 +119,7 @@ def _add_tree(
         return
 
     try:
-        entries = sorted(directory.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        entries = sorted(directory.iterdir(), key=lambda p: (not _is_traversable_directory(p), p.name.lower()))
     except PermissionError:
         tree.add("[red]Permission Denied[/red]")
         return
@@ -128,7 +128,7 @@ def _add_tree(
         if _should_skip(entry.name, skip_hidden=skip_hidden):
             continue
 
-        if entry.is_dir():
+        if _is_traversable_directory(entry):
             branch = tree.add(f" [yellow]{entry.name}[/yellow]")
             _add_tree(
                 tree=branch,
@@ -141,6 +141,18 @@ def _add_tree(
             continue
 
         _add_file_node(tree, entry, callback=callback)
+
+
+def _is_traversable_directory(path: Path) -> bool:
+    """Return True only for real directories that are safe to descend into."""
+    # Directory symlinks can point back to an ancestor; keep them as leaf nodes
+    # so unlimited-depth traversals cannot recurse forever or exhaust paths.
+    try:
+        if path.is_symlink():
+            return False
+        return path.is_dir()
+    except OSError:
+        return False
 
 
 def _should_skip(name: str, skip_hidden: bool) -> bool:
@@ -169,6 +181,8 @@ def _run_callback(callback: CallbackFn | None, file_path: Path) -> str:
 
 
 def _load_module(folder: Path, module: str, func: str) -> CallbackFn:
+    _validate_python_identifier(module, "Module name")
+    _validate_python_identifier(func, "Function name")
     module_file = folder / f"{module}.py"
     _ensure_module_file(module_file)
 
@@ -194,6 +208,12 @@ def _load_module(folder: Path, module: str, func: str) -> CallbackFn:
         fatal(f"Attribute '{func}' in module '{module}' is not callable.")
 
     return cast(CallbackFn, callable_fn)
+
+
+def _validate_python_identifier(value: str, label: str) -> None:
+    if value.isidentifier():
+        return
+    raise typer.BadParameter(f"{label} must be a valid Python identifier.")
 
 
 def _ensure_module_file(module_file: Path) -> None:
