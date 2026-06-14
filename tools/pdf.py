@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -28,6 +29,8 @@ _QUALITY_TO_PDFSETTINGS = {
     "default": "/default",
 }
 
+_GHOSTSCRIPT_BINARIES = ("gs", "gswin64c", "gswin32c")
+
 
 @app.callback()
 def pdf(
@@ -46,16 +49,9 @@ def pdf(
     ),
 ) -> None:
     """Compress a PDF file using Ghostscript."""
-    gs_exe = ensure_binary_or_prompt_install(
-        binary="gs",
-        missing_message=(
-            "Ghostscript executable `gs` not found on PATH. "
-            "Install Ghostscript first (brew/apt/dnf/yum/pacman/zypper/winget/choco)."
-        ),
-        options=ghostscript_install_options(),
-    )
+    gs_exe = _ensure_ghostscript_executable()
     if gs_exe is None:
-        fatal("Ghostscript executable `gs` is required for PDF compression.")
+        fatal("Ghostscript executable `gs`/`gswin64c`/`gswin32c` is required for PDF compression.")
 
     input_path = input_pdf.expanduser().resolve()
     if not input_path.is_file():
@@ -114,6 +110,36 @@ def pdf(
         f"Size: {_human_size(before_bytes)} -> {_human_size(after_bytes)} "
         f"({ratio:+.1f}% reduction)"
     )
+
+
+def _ensure_ghostscript_executable() -> Optional[str]:
+    # Ghostscript's executable name is platform-specific:
+    # 1) Prefer `gs`, which is the Unix/macOS name and may also exist on some Windows PATHs.
+    # 2) Accept Windows console binaries before prompting so normal winget/choco installs work.
+    # 3) After an install prompt, re-check all known names because Windows packages still do not add `gs`.
+    resolved = _find_ghostscript_executable()
+    if resolved is not None:
+        return resolved
+
+    installed = ensure_binary_or_prompt_install(
+        binary="gs",
+        missing_message=(
+            "Ghostscript executable `gs`/`gswin64c`/`gswin32c` not found on PATH. "
+            "Install Ghostscript first (brew/apt/dnf/yum/pacman/zypper/winget/choco)."
+        ),
+        options=ghostscript_install_options(),
+    )
+    if installed is not None:
+        return installed
+    return _find_ghostscript_executable()
+
+
+def _find_ghostscript_executable() -> Optional[str]:
+    for binary in _GHOSTSCRIPT_BINARIES:
+        resolved = shutil.which(binary)
+        if resolved is not None:
+            return resolved
+    return None
 
 
 def _resolve_output_path(input_path: Path, out: Optional[Path]) -> Path:

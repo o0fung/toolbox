@@ -344,9 +344,9 @@ lf pdf ~/Desktop/report.pdf -q printer
 ```
 
 Notes:
-- Requires Ghostscript (`gs`) installed and available on PATH.
+- Requires Ghostscript (`gs`, `gswin64c`, or `gswin32c`) installed and available on PATH.
 - macOS install: `brew install ghostscript`
-- Missing `gs` can trigger an interactive install prompt (`y/N`) using an available package manager (e.g. brew/apt/dnf/yum/pacman/zypper/winget/choco).
+- Missing Ghostscript can trigger an interactive install prompt (`y/N`) using an available package manager (e.g. brew/apt/dnf/yum/pacman/zypper/winget/choco).
 - Output path must be different from input path.
 - Compression ratio depends on source content (embedded images/fonts/compression).
 
