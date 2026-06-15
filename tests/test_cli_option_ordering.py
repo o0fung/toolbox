@@ -20,14 +20,22 @@ else:
 
 
 def _group_context(command, args: Sequence[str]):
-    return command.make_context(command.name or "tool", list(args), resilient_parsing=True)
+    remaining_args = list(args)
+    ctx = command.make_context(command.name or "tool", remaining_args, resilient_parsing=True)
+    ctx._remaining_args_after_parse = remaining_args  # type: ignore[attr-defined]
+    return ctx
 
 
 def _split_group_tokens(ctx) -> List[str]:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
         protected = list(getattr(ctx, "protected_args", []) or [])
-    return protected + list(ctx.args)
+    if protected:
+        return protected + list(ctx.args)
+    remaining = list(getattr(ctx, "_remaining_args_after_parse", []) or [])
+    if remaining:
+        return remaining
+    return list(ctx.args)
 
 
 @unittest.skipIf(get_command is None, f"Missing dependency: {_IMPORT_ERROR}")
