@@ -54,6 +54,37 @@ class PlotToolTests(unittest.TestCase):
         self.assertEqual(plot._format_delta_value(-0.5, "s"), "-0.5s")
         self.assertEqual(plot._format_delta_value(float("nan")), "nan")
 
+    def test_zero_reference_line_does_not_affect_autorange(self) -> None:
+        class FakeInfiniteLine:
+            def __init__(self, **kwargs: object) -> None:
+                self.kwargs = kwargs
+                self.z_value = None
+
+            def setZValue(self, value: int) -> None:
+                self.z_value = value
+
+        class FakePg:
+            InfiniteLine = FakeInfiniteLine
+
+        class FakePlotItem:
+            def __init__(self) -> None:
+                self.added_items: list[tuple[object, dict[str, object]]] = []
+
+            def addItem(self, item: object, **kwargs: object) -> None:
+                self.added_items.append((item, kwargs))
+
+        plot_item = FakePlotItem()
+        pen = object()
+
+        plot._add_zero_reference_line(plot_item, FakePg, pen)
+
+        self.assertEqual(len(plot_item.added_items), 1)
+        zero_line, add_kwargs = plot_item.added_items[0]
+        self.assertIsInstance(zero_line, FakeInfiniteLine)
+        self.assertIs(zero_line.kwargs["pen"], pen)
+        self.assertEqual(zero_line.z_value, -100)
+        self.assertEqual(add_kwargs, {"ignoreBounds": True})
+
     def test_filter_scaled_xlim_clamps_to_data_bounds(self) -> None:
         xs = [0.0, 1.0, 2.0, 3.0]
         ycols = [(1, "signal", [10.0, 11.0, 12.0, 13.0])]

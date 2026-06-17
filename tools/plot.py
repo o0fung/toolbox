@@ -475,6 +475,14 @@ def _format_delta_value(delta_value: float, suffix: str = "") -> str:
     return f"{delta_value:+.6g}{suffix}"
 
 
+def _add_zero_reference_line(plot_item: object, pg_module: object, zero_line_pen: object) -> None:
+    zero_line = pg_module.InfiniteLine(pos=0, angle=0, movable=False, pen=zero_line_pen)
+    zero_line.setZValue(-100)
+    # The zero line is a visual reference only. Keeping it out of bounds avoids
+    # crushing offset-only signals by forcing the y-axis to include zero.
+    plot_item.addItem(zero_line, ignoreBounds=True)
+
+
 @app.callback()
 def plot(
     csv_path: Optional[str] = typer.Argument(None, help="Path to CSV file (optional for --config/--config-show)."),
@@ -776,9 +784,7 @@ def plot(
             plot_item.getAxis("bottom").setTextPen("k")
         except Exception:
             pass
-        zero_line = pg.InfiniteLine(pos=0, angle=0, movable=False, pen=zero_line_pen)
-        zero_line.setZValue(-100)
-        plot_item.addItem(zero_line)
+        _add_zero_reference_line(plot_item, pg, zero_line_pen)
 
         series_label = pg.TextItem(text=name, anchor=(0, 0), color=(0, 0, 0))
         series_label.setZValue(1100)
