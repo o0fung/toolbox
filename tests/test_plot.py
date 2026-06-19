@@ -39,6 +39,45 @@ class PlotToolTests(unittest.TestCase):
         finally:
             handle.close()
 
+    def _write_temp_csv(self, text: str) -> str:
+        handle = tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8")
+        try:
+            handle.write(text)
+            handle.flush()
+            return handle.name
+        finally:
+            handle.close()
+
+    def test_read_csv_preserves_headerless_scientific_notation_first_row(self) -> None:
+        path = self._write_temp_csv("1e-3,2e-3\n3e-3,4e-3\n")
+        try:
+            parsed = plot._read_csv(path, ",")
+        finally:
+            os.unlink(path)
+
+        self.assertEqual(parsed.headers, ["col0", "col1"])
+        self.assertEqual(parsed.rows, [["1e-3", "2e-3"], ["3e-3", "4e-3"]])
+
+    def test_read_csv_preserves_headerless_alphanumeric_identifier_first_row(self) -> None:
+        path = self._write_temp_csv("DEADBEEF,1.0\nCAFE1234,2.0\n")
+        try:
+            parsed = plot._read_csv(path, ",")
+        finally:
+            os.unlink(path)
+
+        self.assertEqual(parsed.headers, ["col0", "col1"])
+        self.assertEqual(parsed.rows, [["DEADBEEF", "1.0"], ["CAFE1234", "2.0"]])
+
+    def test_read_csv_detects_text_headers_above_numeric_rows(self) -> None:
+        path = self._write_temp_csv("time,signal\n1e-3,2e-3\n3e-3,4e-3\n")
+        try:
+            parsed = plot._read_csv(path, ",")
+        finally:
+            os.unlink(path)
+
+        self.assertEqual(parsed.headers, ["time", "signal"])
+        self.assertEqual(parsed.rows, [["1e-3", "2e-3"], ["3e-3", "4e-3"]])
+
     def test_parse_xlim_accepts_float_and_open_bounds(self) -> None:
         self.assertEqual(plot._parse_xlim("1.5,2.5"), (1.5, 2.5))
         self.assertEqual(plot._parse_xlim(",2"), (None, 2.0))

@@ -215,6 +215,62 @@ def _sniff_delimiter(sample: str, fallback: str = ",") -> str:
         return fallback
 
 
+def _looks_like_data_cell(value: str) -> bool:
+    text = value.strip()
+    if not text:
+        return False
+
+    try:
+        float(text)
+        return True
+    except Exception:
+        pass
+
+    try:
+        datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return True
+    except Exception:
+        return False
+
+
+def _detect_header_row(first: List[str], rows: List[List[str]]) -> bool:
+    # Header inference is intentionally conservative because dropping the first
+    # row is destructive for plotting/export. Flow: require label-like text in
+    # the first row, keep rows that are themselves data-like (for example
+    # scientific notation), then only classify a header when later rows provide
+    # type evidence that the first row contains labels.
+    if not any(any(ch.isalpha() for ch in cell or "") for cell in first):
+        return False
+
+    non_empty_first = [cell for cell in first if cell.strip()]
+    if non_empty_first and all(_looks_like_data_cell(cell) for cell in non_empty_first):
+        return False
+
+    sample_rows = rows[1:21]
+    if not sample_rows:
+        return True
+
+    column_count = max(len(row) for row in rows[:21])
+    for col_idx in range(column_count):
+        first_cell = first[col_idx].strip() if col_idx < len(first) else ""
+        if not first_cell or _looks_like_data_cell(first_cell):
+            continue
+
+        later_cells = [
+            row[col_idx].strip()
+            for row in sample_rows
+            if col_idx < len(row) and row[col_idx].strip()
+        ]
+        if not later_cells:
+            continue
+
+        data_like = sum(1 for cell in later_cells if _looks_like_data_cell(cell))
+        if data_like >= max(1, math.ceil(0.8 * len(later_cells))):
+            return True
+
+    return False
+
+
 def _read_csv(path: str, delimiter: Optional[str]) -> ParsedCSV:
     """Read CSV file with optional delimiter auto-sniff and header detection."""
     path = os.path.expanduser(path)
@@ -234,10 +290,7 @@ def _read_csv(path: str, delimiter: Optional[str]) -> ParsedCSV:
 
     first = all_rows[0]
 
-    def has_alpha(value: str) -> bool:
-        return any(ch.isalpha() for ch in value)
-
-    header_present = any(has_alpha(cell or "") for cell in first)
+    header_present = _detect_header_row(first, all_rows)
     if header_present:
         headers = [item.strip() or f"col{i}" for i, item in enumerate(first)]
         rows = all_rows[1:]

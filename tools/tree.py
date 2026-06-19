@@ -197,6 +197,8 @@ def _load_module(folder: Path, module: str, func: str) -> CallbackFn:
 
 
 def _ensure_module_file(module_file: Path) -> None:
+    _reject_module_symlink(module_file)
+
     if module_file.is_file():
         return
 
@@ -215,10 +217,17 @@ def _ensure_module_file(module_file: Path) -> None:
 
 
 def _append_function_stub(module_file: Path, func_name: str) -> None:
+    _reject_module_symlink(module_file)
+
     with module_file.open("a", encoding="utf-8") as handle:
         handle.write(f"\n\ndef {func_name}(filepath: str):\n")
         handle.write('    """Auto-created stub. Return None."""\n')
         handle.write("    return\n")
+
+
+def _reject_module_symlink(module_file: Path) -> None:
+    if module_file.is_symlink():
+        fatal(f"Refusing to use module symlink: {module_file}")
 
 
 def _import_module(module_name: str, module_file: Path) -> ModuleType:

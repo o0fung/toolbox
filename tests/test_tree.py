@@ -5,9 +5,11 @@ import unittest
 from pathlib import Path
 
 try:
+    import typer
     from rich.console import Console
     from tools import tree
 except ModuleNotFoundError as exc:  # pragma: no cover - env-dependent
+    typer = None  # type: ignore[assignment]
     Console = None  # type: ignore[assignment]
     tree = None  # type: ignore[assignment]
     _IMPORT_ERROR = exc
@@ -75,6 +77,20 @@ class TreeToolTests(unittest.TestCase):
             self.assertTrue(module_file.exists())
             text = module_file.read_text(encoding="utf-8")
             self.assertIn("def custom_func(filepath: str):", text)
+
+    def test_load_module_refuses_module_symlink_without_modifying_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            target = root / "target.py"
+            original = "def existing(filepath: str):\n    return None\n"
+            target.write_text(original, encoding="utf-8")
+            (root / "_script.py").symlink_to(target)
+
+            with self.assertRaises(typer.Exit) as raised:
+                tree._load_module(root, "_script", "missing_func")
+
+            self.assertEqual(raised.exception.exit_code, 1)
+            self.assertEqual(target.read_text(encoding="utf-8"), original)
 
 
 if __name__ == "__main__":
