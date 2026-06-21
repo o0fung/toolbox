@@ -268,14 +268,16 @@ def _download_with_fallback(
     ydl_opts: dict[str, Any],
     format_candidates: tuple[str, ...],
 ) -> dict[str, Any]:
-    skip_download = bool(ydl_opts.get("skip_download", False))
     last_error: Optional[Exception] = None
 
+    # Try each format expression until yt-dlp succeeds. Even when
+    # skip_download=True for subtitle-only mode, extract_info must run with
+    # download=True so yt-dlp performs side-effect downloads such as subtitles.
     for idx, format_expr in enumerate(format_candidates):
         attempt_opts = dict(ydl_opts)
         attempt_opts["format"] = format_expr
         try:
-            result = _extract_info(url, ydl_opts=attempt_opts, download=not skip_download)
+            result = _extract_info(url, ydl_opts=attempt_opts, download=True)
             if idx > 0:
                 info(f"Succeeded with fallback format expression: {format_expr}")
             return result
