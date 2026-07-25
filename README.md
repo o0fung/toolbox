@@ -11,6 +11,7 @@ A set of useful command-line tools for enhancing productivity.
 - **cheque**: Convert HKD amounts (supports cents) to formal HK cheque wording in Traditional Chinese and English.
 - **pdf**: Compress PDF files using Ghostscript quality presets.
 - **plot**: Plot CSV data with pyqtgraph subplots.
+- **note**: Create, organize, list, and open timestamped Markdown notes.
 
 ## Installation
 
@@ -497,6 +498,66 @@ Notes:
 
 ---
 
+## 🚩 note
+
+Create and manage timestamped Markdown notes under `~/Documents/note`.
+
+**Usage:**
+```sh
+# Create a note in the main notes folder
+lf note Project ideas
+
+# Create a categorized note; missing subfolders are created automatically
+lf note "API decision" -f work/backend
+
+# List all notes recursively, newest first
+lf note -l
+
+# List notes under one subfolder and filter their relative paths
+lf note -l -f work -m api
+
+# Open by exact relative path, filename, or unique partial match
+lf note -o api-decision
+lf note -o work/backend/20260725-160000_api-decision.md
+
+# Open a notes folder in Finder or the platform file browser
+lf note --browse
+lf note --browse -f work
+
+# Create/open the configuration file
+lf note -c
+```
+
+New filenames follow `YYYYmmdd-HHMMSS_<normalized-title>.md`. For example:
+```text
+20260725-160000_project-ideas.md
+```
+
+The original title is written as the Markdown heading. Filename characters are normalized for portability across macOS, Linux, and Windows. If the same title is created within one second, a numeric suffix prevents overwriting.
+
+**Options:**
+- `-c, --config`: Create/open `~/.config/lf-toolbox/note.defaults.json` and exit.
+- `-l, --list`: Recursively list notes, newest first.
+- `-m, --match TEXT`: Filter `--list` by relative path or filename.
+- `-o, --open SELECTOR`: Open an exact or uniquely matching note.
+- `-f, --subfolder PATH`: Restrict creation, listing, opening, or browsing to a relative subfolder.
+- `--browse`: Open the selected notes folder in the system file browser.
+
+Subfolders are ordinary filesystem folders. They may be created, moved, or renamed in Finder or another file manager; recursive listing and matching discover the current structure without an index or database. Absolute paths and parent traversal (`..`) are rejected for `--subfolder`.
+
+The configuration is loaded automatically whenever `note` runs:
+```json
+{
+  "notes_dir": "~/Documents/note",
+  "editor": null,
+  "add_title_heading": true
+}
+```
+
+Editor selection uses the configured `editor`, then `VISUAL`, then `EDITOR`. The platform fallback is Nano on macOS, Nano or Vi on Linux, and Notepad on Windows. Editor commands may include arguments, such as `"code --wait"`.
+
+---
+
 ## Project Structure
 
 ```
@@ -511,8 +572,10 @@ tools/
 	cheque.py     # HK cheque wording (Chinese + English)
 	pdf.py        # PDF compression via Ghostscript
 	plot.py       # CSV plotting with pyqtgraph (PyQt6)
+	note.py       # Timestamped Markdown note manager
 tests/
 	test_cheque.py
+	test_note.py
 	test_pdf.py
 	test_tree.py
 ```
