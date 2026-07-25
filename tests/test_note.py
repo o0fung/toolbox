@@ -109,7 +109,7 @@ class NoteToolTests(unittest.TestCase):
         (self.notes_root / "personal" / "20260724-090000_shopping.md").write_text("", encoding="utf-8")
 
         all_result = CliRunner().invoke(note.app, ["--list"])
-        filtered_result = CliRunner().invoke(note.app, ["--list", "--match", "work/api"])
+        filtered_result = CliRunner().invoke(note.app, ["--list", "--match", "api"])
 
         self.assertEqual(all_result.exit_code, 0, all_result.output)
         self.assertEqual(

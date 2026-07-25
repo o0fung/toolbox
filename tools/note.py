@@ -22,7 +22,10 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from tools._cli_common import new_typer_app
 
 
-app = new_typer_app(context_settings={"allow_interspersed_args": True})
+app = new_typer_app(
+    context_settings={"allow_interspersed_args": True},
+    invoke_without_command=True,
+)
 
 _DEFAULT_NOTE_CONFIG_PATH = os.path.expanduser("~/.config/lf-toolbox/note.defaults.json")
 _CONFIG_KEYS = {"notes_dir", "editor", "add_title_heading"}
