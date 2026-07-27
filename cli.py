@@ -21,7 +21,7 @@ Examples:
     python cli.py cheque 123.45             # cheque wording with cents
     python cli.py pdf input.pdf             # compress PDF
     python cli.py plot data.csv             # CSV plotting
-    python cli.py note project ideas         # create and edit a note
+    python cli.py note -n "project ideas"    # create and edit a note
 """
 
 from __future__ import annotations

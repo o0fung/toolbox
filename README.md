@@ -500,29 +500,35 @@ Notes:
 
 ## 🚩 note
 
-Create and manage timestamped Markdown notes under `~/Documents/note`.
+Create and manage timestamped Markdown notes under `~/Documents/notes`.
 
 **Usage:**
 ```sh
 # Create a note in the main notes folder
-lf note Project ideas
+lf note --new "Project ideas"
 
 # Create a categorized note; missing subfolders are created automatically
-lf note "API decision" -f work/backend
+lf note --new "API decision" -f work/backend
 
-# List all notes recursively, newest first
+# List notes as a directory tree
 lf note -l
 
-# List notes under one subfolder and filter their relative paths
-lf note -l -f work -m api
+# List only one subfolder
+lf note -l -f work
 
 # Open by exact relative path, filename, or unique partial match
-lf note -o api-decision
-lf note -o work/backend/20260725-160000_api-decision.md
+lf note api-decision
+lf note work/backend/20260725-160000_api-decision.md
 
 # Open a notes folder in Finder or the platform file browser
-lf note --browse
-lf note --browse -f work
+lf note
+lf note -f work
+
+# Open the folder URL in the default web browser
+lf note -b
+
+# List in the terminal and open the same subfolder in the web browser
+lf note -l -b -f work
 
 # Create/open the configuration file
 lf note -c
@@ -537,24 +543,26 @@ The original title is written as the Markdown heading. Filename characters are n
 
 **Options:**
 - `-c, --config`: Create/open `~/.config/lf-toolbox/note.defaults.json` and exit.
-- `-l, --list`: Recursively list notes, newest first.
-- `-m, --match TEXT`: Filter `--list` by relative path or filename.
-- `-o, --open SELECTOR`: Open an exact or uniquely matching note.
+- `-l, --list`: List notes as a recursive directory tree. Folders are alphabetical and notes within each folder are newest first.
+- `-b, --browse`: Open the selected notes folder as a `file://` URL in the default web browser. It may be combined with `--list`.
+- `-n, --new TITLE`: Create and open a new timestamped note.
 - `-f, --subfolder PATH`: Restrict creation, listing, opening, or browsing to a relative subfolder.
-- `--browse`: Open the selected notes folder in the system file browser.
 
-Subfolders are ordinary filesystem folders. They may be created, moved, or renamed in Finder or another file manager; recursive listing and matching discover the current structure without an index or database. Absolute paths and parent traversal (`..`) are rejected for `--subfolder`.
+Positional text opens an exact or uniquely matching existing note. With no positional text or action, `note` opens the selected notes folder in Finder or the platform file browser; explicit `--browse` instead uses the default web browser. Subfolders are ordinary filesystem folders and are created automatically when browsing or creating. They may be moved or renamed in Finder or another file manager; recursive listing and matching discover the current structure without an index or database. Absolute paths and parent traversal (`..`) are rejected for `--subfolder`.
 
 The configuration is loaded automatically whenever `note` runs:
 ```json
 {
-  "notes_dir": "~/Documents/note",
+  "notes_dir": "~/Documents/notes",
   "editor": null,
+  "browser": null,
   "add_title_heading": true
 }
 ```
 
 Editor selection uses the configured `editor`, then `VISUAL`, then `EDITOR`. The platform fallback is Nano on macOS, Nano or Vi on Linux, and Notepad on Windows. Editor commands may include arguments, such as `"code --wait"`.
+
+The `browser` setting is an optional command template for `--browse`; `%s` is replaced with the selected folder’s `file://` URL. Leave it as `null` to use the system default web browser. For example, macOS users can select Google Chrome with `"browser": "open -a \"Google Chrome\" %s"`.
 
 ---
 

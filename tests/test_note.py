@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 from unittest.mock import patch
 
 try:
@@ -46,15 +47,25 @@ class NoteToolTests(unittest.TestCase):
         self.assertFalse(note._ensure_note_config_file(str(self.config_path)))
 
         loaded = note._load_note_config(str(self.config_path))
-        self.assertEqual(loaded["notes_dir"], "~/Documents/note")
+        self.assertEqual(loaded["notes_dir"], "~/Documents/notes")
         self.assertIsNone(loaded["editor"])
+        self.assertIsNone(loaded["browser"])
         self.assertTrue(loaded["add_title_heading"])
 
     def test_load_config_merges_partial_values_and_rejects_unknown_keys(self) -> None:
-        self.config_path.write_text(json.dumps({"editor": "code --wait"}), encoding="utf-8")
+        self.config_path.write_text(
+            json.dumps(
+                {
+                    "editor": "code --wait",
+                    "browser": 'open -a "Google Chrome" %s',
+                }
+            ),
+            encoding="utf-8",
+        )
         loaded = note._load_note_config(str(self.config_path))
         self.assertEqual(loaded["editor"], "code --wait")
-        self.assertEqual(loaded["notes_dir"], "~/Documents/note")
+        self.assertEqual(loaded["browser"], 'open -a "Google Chrome" %s')
+        self.assertEqual(loaded["notes_dir"], "~/Documents/notes")
 
         self.config_path.write_text(json.dumps({"unknown": True}), encoding="utf-8")
         with self.assertRaises(typer.BadParameter):
@@ -82,7 +93,10 @@ class NoteToolTests(unittest.TestCase):
         opened: list[Path] = []
 
         with patch("tools.note._open_in_editor", side_effect=lambda path, _editor: opened.append(path)):
-            result = CliRunner().invoke(note.app, ["API", "decision", "-f", "work/backend"])
+            result = CliRunner().invoke(
+                note.app,
+                ["--new", "API decision", "-f", "work/backend"],
+            )
 
         self.assertEqual(result.exit_code, 0, result.output)
         created = list((self.notes_root / "work" / "backend").glob("*.md"))
@@ -95,32 +109,34 @@ class NoteToolTests(unittest.TestCase):
         self._write_config(add_title_heading=False)
 
         with patch("tools.note._open_in_editor"):
-            result = CliRunner().invoke(note.app, ["Empty", "body"])
+            result = CliRunner().invoke(note.app, ["--new", "Empty body"])
 
         self.assertEqual(result.exit_code, 0, result.output)
         created = next(self.notes_root.glob("*.md"))
         self.assertEqual(created.read_text(encoding="utf-8"), "")
 
-    def test_recursive_list_is_newest_first_and_filterable(self) -> None:
+    def test_recursive_list_is_a_sorted_tree(self) -> None:
         self._write_config()
         (self.notes_root / "work").mkdir(parents=True)
         (self.notes_root / "personal").mkdir()
+        (self.notes_root / "work" / "20260723-080000_older.md").write_text("", encoding="utf-8")
         (self.notes_root / "work" / "20260725-160000_api-review.md").write_text("", encoding="utf-8")
         (self.notes_root / "personal" / "20260724-090000_shopping.md").write_text("", encoding="utf-8")
 
-        all_result = CliRunner().invoke(note.app, ["--list"])
-        filtered_result = CliRunner().invoke(note.app, ["--list", "--match", "api"])
+        result = CliRunner().invoke(note.app, ["--list"])
 
-        self.assertEqual(all_result.exit_code, 0, all_result.output)
+        self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(
-            all_result.output.strip().splitlines(),
+            result.output.strip().splitlines(),
             [
-                "work/20260725-160000_api-review.md",
-                "personal/20260724-090000_shopping.md",
+                "note/",
+                "├── personal/",
+                "│   └── 20260724-090000_shopping.md",
+                "└── work/",
+                "    ├── 20260725-160000_api-review.md",
+                "    └── 20260723-080000_older.md",
             ],
         )
-        self.assertEqual(filtered_result.exit_code, 0, filtered_result.output)
-        self.assertEqual(filtered_result.output.strip(), "work/20260725-160000_api-review.md")
 
     def test_list_on_missing_main_folder_is_empty(self) -> None:
         self._write_config()
@@ -129,7 +145,7 @@ class NoteToolTests(unittest.TestCase):
         self.assertEqual(result.output.strip(), "No notes found.")
         self.assertFalse(self.notes_root.exists())
 
-    def test_open_uses_unique_recursive_partial_match(self) -> None:
+    def test_positional_text_opens_unique_recursive_partial_match(self) -> None:
         self._write_config()
         target = self.notes_root / "work" / "20260725-160000_api-decision.md"
         target.parent.mkdir(parents=True)
@@ -137,12 +153,12 @@ class NoteToolTests(unittest.TestCase):
         opened: list[Path] = []
 
         with patch("tools.note._open_in_editor", side_effect=lambda path, _editor: opened.append(path)):
-            result = CliRunner().invoke(note.app, ["--open", "api-decision"])
+            result = CliRunner().invoke(note.app, ["api", "decision"])
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(opened, [target])
 
-    def test_open_reports_ambiguous_matches(self) -> None:
+    def test_positional_text_reports_ambiguous_matches(self) -> None:
         self._write_config()
         for folder, filename in (
             ("work", "20260725-160000_review.md"),
@@ -152,7 +168,7 @@ class NoteToolTests(unittest.TestCase):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("", encoding="utf-8")
 
-        result = CliRunner().invoke(note.app, ["--open", "review"])
+        result = CliRunner().invoke(note.app, ["review"])
 
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("Multiple notes match 'review'", result.output)
@@ -169,32 +185,108 @@ class NoteToolTests(unittest.TestCase):
         other.write_text("", encoding="utf-8")
 
         with patch("tools.note._open_in_editor") as open_editor:
-            result = CliRunner().invoke(note.app, ["--open", "review", "-f", "work"])
+            result = CliRunner().invoke(note.app, ["review", "-f", "work"])
 
         self.assertEqual(result.exit_code, 0, result.output)
         open_editor.assert_called_once_with(expected, None)
 
     def test_subfolder_rejects_absolute_and_parent_traversal(self) -> None:
         self._write_config()
-        absolute = CliRunner().invoke(note.app, ["Title", "-f", str(self.temp_path)])
-        traversal = CliRunner().invoke(note.app, ["Title", "-f", "../outside"])
+        absolute = CliRunner().invoke(
+            note.app,
+            ["--new", "Title", "-f", str(self.temp_path)],
+        )
+        traversal = CliRunner().invoke(
+            note.app,
+            ["--new", "Title", "-f", "../outside"],
+        )
 
         self.assertNotEqual(absolute.exit_code, 0)
         self.assertIn("must be relative", absolute.output)
         self.assertNotEqual(traversal.exit_code, 0)
         self.assertIn("must not contain", traversal.output)
 
-    def test_browse_creates_selected_folder(self) -> None:
+    def test_empty_invocation_browses_notes_root(self) -> None:
         self._write_config()
         browsed: list[Path] = []
 
         with patch("tools.note._browse_directory", side_effect=lambda path: browsed.append(path)):
-            result = CliRunner().invoke(note.app, ["--browse", "-f", "work/projects"])
+            result = CliRunner().invoke(note.app, [])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(self.notes_root.is_dir())
+        self.assertEqual(browsed, [self.notes_root])
+
+    def test_empty_invocation_browses_and_creates_selected_folder(self) -> None:
+        self._write_config()
+        browsed: list[Path] = []
+
+        with patch("tools.note._browse_directory", side_effect=lambda path: browsed.append(path)):
+            result = CliRunner().invoke(note.app, ["-f", "work/projects"])
 
         expected = self.notes_root / "work" / "projects"
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertTrue(expected.is_dir())
         self.assertEqual(browsed, [expected])
+
+    def test_web_browse_opens_and_creates_selected_folder(self) -> None:
+        browser = 'open -a "Google Chrome" %s'
+        self._write_config(browser=browser)
+        browsed: list[tuple[Path, Optional[str]]] = []
+
+        with patch(
+            "tools.note._browse_directory_in_web_browser",
+            side_effect=lambda path, configured: browsed.append((path, configured)),
+        ):
+            result = CliRunner().invoke(note.app, ["--browse", "-f", "work/projects"])
+
+        expected = self.notes_root / "work" / "projects"
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(expected.is_dir())
+        self.assertEqual(browsed, [(expected, browser)])
+
+    def test_list_and_web_browse_run_together(self) -> None:
+        self._write_config()
+        target = self.notes_root / "work" / "20260725-160000_api-review.md"
+        target.parent.mkdir(parents=True)
+        target.write_text("", encoding="utf-8")
+        browsed: list[Path] = []
+
+        with patch(
+            "tools.note._browse_directory_in_web_browser",
+            side_effect=lambda path, _browser: browsed.append(path),
+        ):
+            result = CliRunner().invoke(note.app, ["--list", "--browse"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("20260725-160000_api-review.md", result.output)
+        self.assertEqual(browsed, [self.notes_root])
+
+    def test_web_browse_uses_folder_file_url(self) -> None:
+        self.notes_root.mkdir(parents=True)
+
+        with patch("tools.note.webbrowser.open", return_value=True) as open_browser:
+            note._browse_directory_in_web_browser(self.notes_root, None)
+
+        open_browser.assert_called_once_with(self.notes_root.resolve().as_uri())
+
+    def test_web_browse_uses_configured_browser_command(self) -> None:
+        self.notes_root.mkdir(parents=True)
+
+        with patch("tools.note.subprocess.Popen") as popen:
+            note._browse_directory_in_web_browser(
+                self.notes_root,
+                'open -a "Google Chrome" %s',
+            )
+
+        popen.assert_called_once_with(
+            [
+                "open",
+                "-a",
+                "Google Chrome",
+                self.notes_root.resolve().as_uri(),
+            ]
+        )
 
     def test_config_action_creates_and_opens_config(self) -> None:
         opened: list[Path] = []
@@ -205,18 +297,23 @@ class NoteToolTests(unittest.TestCase):
         self.assertTrue(self.config_path.is_file())
         self.assertEqual(opened, [self.config_path])
 
-    def test_modes_and_match_are_validated_before_side_effects(self) -> None:
+    def test_modes_are_validated_before_side_effects(self) -> None:
         self._write_config()
         combined = CliRunner().invoke(note.app, ["Title", "--list"])
-        misplaced_match = CliRunner().invoke(note.app, ["Title", "--match", "x"])
-        empty = CliRunner().invoke(note.app, [])
+        search_and_create = CliRunner().invoke(note.app, ["Title", "--new", "Other"])
+        search_and_browse = CliRunner().invoke(note.app, ["Title", "--browse"])
+        removed_match = CliRunner().invoke(note.app, ["--match", "x"])
+        removed_open = CliRunner().invoke(note.app, ["--open", "x"])
 
         self.assertNotEqual(combined.exit_code, 0)
         self.assertIn("Choose only one action", combined.output)
-        self.assertNotEqual(misplaced_match.exit_code, 0)
-        self.assertIn("--match may only be used with --list", misplaced_match.output)
-        self.assertNotEqual(empty.exit_code, 0)
-        self.assertIn("Provide a note TITLE", empty.output)
+        self.assertNotEqual(search_and_create.exit_code, 0)
+        self.assertIn("Choose only one action", search_and_create.output)
+        self.assertNotEqual(search_and_browse.exit_code, 0)
+        self.assertIn("Choose only one action", search_and_browse.output)
+        for removed in (removed_match, removed_open):
+            self.assertNotEqual(removed.exit_code, 0)
+            self.assertIn("No such option", removed.output)
         self.assertFalse(self.notes_root.exists())
 
     def test_editor_resolution_prefers_config_then_environment(self) -> None:

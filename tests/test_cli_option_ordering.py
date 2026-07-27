@@ -117,16 +117,29 @@ class CallbackOptionOrderingPhaseOneTests(unittest.TestCase):
         self.assertEqual(ctx.params["value"], "123.45")
         self.assertEqual(ctx.args, [])
 
-    def test_note_accepts_options_before_or_after_title_words(self) -> None:
+    def test_note_accepts_subfolder_before_or_after_selector_words(self) -> None:
         command = get_command(note.app)
         before_ctx = _group_context(command, ["-f", "work", "Project", "ideas"])
         after_ctx = _group_context(command, ["Project", "ideas", "-f", "work"])
 
-        self.assertEqual(before_ctx.params["title"], ("Project", "ideas"))
+        self.assertEqual(before_ctx.params["selector"], ("Project", "ideas"))
         self.assertEqual(before_ctx.params["subfolder"], "work")
         self.assertEqual(before_ctx.args, [])
 
-        self.assertEqual(after_ctx.params["title"], ("Project", "ideas"))
+        self.assertEqual(after_ctx.params["selector"], ("Project", "ideas"))
+        self.assertEqual(after_ctx.params["subfolder"], "work")
+        self.assertEqual(after_ctx.args, [])
+
+    def test_note_accepts_new_title_before_or_after_subfolder(self) -> None:
+        command = get_command(note.app)
+        before_ctx = _group_context(command, ["--new", "Project ideas", "-f", "work"])
+        after_ctx = _group_context(command, ["-f", "work", "--new", "Project ideas"])
+
+        self.assertEqual(before_ctx.params["new_title"], "Project ideas")
+        self.assertEqual(before_ctx.params["subfolder"], "work")
+        self.assertEqual(before_ctx.args, [])
+
+        self.assertEqual(after_ctx.params["new_title"], "Project ideas")
         self.assertEqual(after_ctx.params["subfolder"], "work")
         self.assertEqual(after_ctx.args, [])
 

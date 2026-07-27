@@ -9,12 +9,14 @@ import shlex
 import shutil
 import subprocess
 import sys
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 import typer
 from rich import print
+from rich.tree import Tree
 
 try:
     from ._cli_common import new_typer_app
@@ -28,7 +30,7 @@ app = new_typer_app(
 )
 
 _DEFAULT_NOTE_CONFIG_PATH = os.path.expanduser("~/.config/lf-toolbox/note.defaults.json")
-_CONFIG_KEYS = {"notes_dir", "editor", "add_title_heading"}
+_CONFIG_KEYS = {"notes_dir", "editor", "browser", "add_title_heading"}
 _TIMESTAMP_PATTERN = re.compile(r"^(\d{8}-\d{6})_")
 _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _INVALID_FOLDER_CHARS = re.compile(r'[<>:"\\|?*\x00-\x1f]')
@@ -36,8 +38,9 @@ _INVALID_FOLDER_CHARS = re.compile(r'[<>:"\\|?*\x00-\x1f]')
 
 def _default_note_config_payload() -> Dict[str, object]:
     return {
-        "notes_dir": "~/Documents/note",
+        "notes_dir": "~/Documents/notes",
         "editor": None,
+        "browser": None,
         "add_title_heading": True,
     }
 
@@ -64,10 +67,10 @@ def _normalize_config_value(key: str, value: object) -> object:
             return value
         raise typer.BadParameter("Config key 'notes_dir' must be a non-empty string")
 
-    if key == "editor":
+    if key in {"editor", "browser"}:
         if value is None or (isinstance(value, str) and value.strip()):
             return value
-        raise typer.BadParameter("Config key 'editor' must be a non-empty string or null")
+        raise typer.BadParameter(f"Config key '{key}' must be a non-empty string or null")
 
     if key == "add_title_heading":
         if isinstance(value, bool):
@@ -141,6 +144,27 @@ def _browse_directory(path: Path) -> None:
             subprocess.Popen(["xdg-open", str(path)])
     except OSError as exc:
         raise typer.BadParameter(f"Cannot open notes folder '{path}': {exc}") from exc
+
+
+def _browse_directory_in_web_browser(path: Path, configured_browser: Optional[str]) -> None:
+    url = path.resolve().as_uri()
+    if configured_browser:
+        command = shlex.split(configured_browser, posix=os.name != "nt")
+        if not command or not any("%s" in part for part in command):
+            raise typer.BadParameter("Configured browser command must contain a %s URL placeholder")
+        command = [part.replace("%s", url) for part in command]
+        try:
+            subprocess.Popen(command)
+        except OSError as exc:
+            raise typer.BadParameter(f"Cannot open configured browser '{command[0]}': {exc}") from exc
+        return
+
+    try:
+        opened = webbrowser.open(url)
+    except webbrowser.Error as exc:
+        raise typer.BadParameter(f"Cannot open notes folder URL '{url}': {exc}") from exc
+    if not opened:
+        raise typer.BadParameter(f"No web browser could open notes folder URL: {url}")
 
 
 def _notes_root(config: Dict[str, object]) -> Path:
@@ -254,33 +278,54 @@ def _relative_display(path: Path, notes_root: Path) -> str:
     return path.relative_to(notes_root).as_posix()
 
 
-def _list_notes(notes_root: Path, search_root: Path, match: Optional[str]) -> None:
+def _list_notes(notes_root: Path, search_root: Path) -> None:
     notes = _sorted_notes(search_root)
-    if match:
-        query = match.casefold()
-        notes = [
-            path
-            for path in notes
-            if query in _relative_display(path, notes_root).casefold()
-        ]
-
     if not notes:
-        typer.echo("No matching notes found." if match else "No notes found.")
+        typer.echo("No notes found.")
         return
 
-    for path in notes:
-        typer.echo(_relative_display(path, notes_root))
+    scope = _relative_display(search_root, notes_root)
+    tree = Tree(f"{notes_root.name if scope == '.' else scope}/")
+    _add_note_tree(tree, search_root, notes)
+    print(tree)
+
+
+def _add_note_tree(tree: Tree, directory: Path, notes: Sequence[Path]) -> None:
+    """Add note-containing folders alphabetically, then notes newest-first."""
+    child_names = sorted(
+        {
+            path.relative_to(directory).parts[0]
+            for path in notes
+            if len(path.relative_to(directory).parts) > 1
+        },
+        key=str.casefold,
+    )
+    for child_name in child_names:
+        child_directory = directory / child_name
+        child_tree = tree.add(f"{child_name}/")
+        child_notes = [path for path in notes if child_directory in path.parents]
+        _add_note_tree(child_tree, child_directory, child_notes)
+
+    direct_notes = sorted(
+        (path for path in notes if path.parent == directory),
+        key=lambda path: (_note_sort_time(path), path.name.casefold()),
+        reverse=True,
+    )
+    for path in direct_notes:
+        tree.add(path.name)
 
 
 def _unique_match(selector: str, candidates: Sequence[Path], notes_root: Path, search_root: Path) -> Path:
     query = selector.strip().replace("\\", "/").casefold()
     if not query:
-        raise typer.BadParameter("Open selector must not be empty")
+        raise typer.BadParameter("Note selector must not be empty")
+    queries = {query, re.sub(r"\s+", "-", query)}
 
     # Matching proceeds from least ambiguous to most convenient:
     # 1) exact root-relative or selected-folder-relative path,
     # 2) exact filename/stem anywhere in scope,
     # 3) substring across the displayed relative path.
+    # Space-separated selector words also match normalized filename hyphens.
     # Every phase requires one unique result so the command never guesses.
     def path_forms(path: Path) -> List[str]:
         root_relative = _relative_display(path, notes_root).casefold()
@@ -291,7 +336,11 @@ def _unique_match(selector: str, candidates: Sequence[Path], notes_root: Path, s
         )
         return forms
 
-    exact_paths = [path for path in candidates if query in path_forms(path)]
+    exact_paths = [
+        path
+        for path in candidates
+        if any(query_variant in path_forms(path) for query_variant in queries)
+    ]
     if len(exact_paths) == 1:
         return exact_paths[0]
     if len(exact_paths) > 1:
@@ -300,7 +349,10 @@ def _unique_match(selector: str, candidates: Sequence[Path], notes_root: Path, s
     exact_names = [
         path
         for path in candidates
-        if query in {path.name.casefold(), path.stem.casefold()}
+        if any(
+            query_variant in {path.name.casefold(), path.stem.casefold()}
+            for query_variant in queries
+        )
     ]
     if len(exact_names) == 1:
         return exact_names[0]
@@ -310,7 +362,10 @@ def _unique_match(selector: str, candidates: Sequence[Path], notes_root: Path, s
     partial = [
         path
         for path in candidates
-        if query in _relative_display(path, notes_root).casefold()
+        if any(
+            query_variant in _relative_display(path, notes_root).casefold()
+            for query_variant in queries
+        )
     ]
     if len(partial) == 1:
         return partial[0]
@@ -335,10 +390,10 @@ def _config_editor_for_setup(path: str) -> Optional[str]:
 
 @app.callback()
 def note(
-    title: Optional[List[str]] = typer.Argument(
+    selector: Optional[List[str]] = typer.Argument(
         None,
-        metavar="[TITLE]...",
-        help="Title for a new note. Multiple words may be quoted or passed separately.",
+        metavar="[TEXT]...",
+        help="Existing note selector. Multiple words may be quoted or passed separately.",
     ),
     config: bool = typer.Option(
         False,
@@ -346,13 +401,24 @@ def note(
         "--config",
         help="Create/open the note configuration file and exit.",
     ),
-    list_all: bool = typer.Option(False, "-l", "--list", help="List notes recursively, newest first."),
-    match: Optional[str] = typer.Option(None, "-m", "--match", help="Filter --list by path or filename."),
-    open_selector: Optional[str] = typer.Option(
+    list_all: bool = typer.Option(
+        False,
+        "-l",
+        "--list",
+        help="List notes as a recursive directory tree.",
+    ),
+    browse: bool = typer.Option(
+        False,
+        "-b",
+        "--browse",
+        help="Open the selected notes folder in the default web browser.",
+    ),
+    new_title: Optional[str] = typer.Option(
         None,
-        "-o",
-        "--open",
-        help="Open an existing note by relative path, filename, or unique partial match.",
+        "-n",
+        "--new",
+        metavar="TITLE",
+        help="Create and open a new note.",
     ),
     subfolder: Optional[str] = typer.Option(
         None,
@@ -360,31 +426,26 @@ def note(
         "--subfolder",
         help="Create, list, search, or browse within this relative notes subfolder.",
     ),
-    browse: bool = typer.Option(False, "--browse", help="Open the notes directory in the system file browser."),
 ) -> None:
     """Create, list, find, and organize timestamped Markdown notes."""
-    title_text = " ".join(title or []).strip()
+    selector_text = " ".join(selector or []).strip()
 
-    # Exactly one mode may run per invocation. Creation is the default mode when
-    # title words are supplied; all other modes are explicit and side-effect
-    # boundaries are checked before config, folders, or files are touched.
-    selected_modes = [
+    # Search, creation, and config remain exclusive actions. Listing and web
+    # browsing may run together; an invocation with neither still opens the
+    # selected folder in the platform file browser.
+    selected_actions = [
         name
         for name, enabled in (
-            ("create", bool(title_text)),
+            ("search", bool(selector_text)),
+            ("create", new_title is not None),
             ("config", config),
             ("list", list_all),
-            ("open", open_selector is not None),
             ("browse", browse),
         )
         if enabled
     ]
-    if not selected_modes:
-        raise typer.BadParameter("Provide a note TITLE, or use --list, --open, --browse, or --config.")
-    if len(selected_modes) > 1:
-        raise typer.BadParameter(f"Choose only one action: {', '.join(selected_modes)}")
-    if match is not None and not list_all:
-        raise typer.BadParameter("--match may only be used with --list")
+    if len(selected_actions) > 1 and set(selected_actions) != {"list", "browse"}:
+        raise typer.BadParameter(f"Choose only one action: {', '.join(selected_actions)}")
     if config and subfolder is not None:
         raise typer.BadParameter("--subfolder cannot be used with --config")
 
@@ -400,16 +461,25 @@ def note(
 
     settings = _load_note_config(_DEFAULT_NOTE_CONFIG_PATH)
     notes_root = _notes_root(settings)
-    create_folder = selected_modes[0] in {"create", "browse"}
+    implicit_file_browse = not selected_actions
+    create_folder = new_title is not None or browse or implicit_file_browse
     search_root = _resolve_subfolder(notes_root, subfolder, create=create_folder)
 
     if list_all:
-        _list_notes(notes_root, search_root, match)
+        _list_notes(notes_root, search_root)
+        if not browse:
+            return
+
+    if browse:
+        _browse_directory_in_web_browser(
+            search_root,
+            settings["browser"] if isinstance(settings["browser"], str) else None,
+        )
         return
 
-    if open_selector is not None:
+    if selector_text:
         target = _unique_match(
-            open_selector,
+            selector_text,
             _sorted_notes(search_root),
             notes_root,
             search_root,
@@ -417,13 +487,13 @@ def note(
         _open_in_editor(target, settings["editor"] if isinstance(settings["editor"], str) else None)
         return
 
-    if browse:
+    if implicit_file_browse:
         _browse_directory(search_root)
         return
 
     note_path = _create_note(
         search_root,
-        title_text,
+        new_title or "",
         add_title_heading=bool(settings["add_title_heading"]),
     )
     print(f"[green]Created note[/green]: {_relative_display(note_path, notes_root)}")
