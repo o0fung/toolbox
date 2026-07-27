@@ -297,6 +297,13 @@ class NoteToolTests(unittest.TestCase):
         self.assertTrue(self.config_path.is_file())
         self.assertEqual(opened, [self.config_path])
 
+    def test_help_shows_cross_platform_browser_config_examples(self) -> None:
+        result = CliRunner().invoke(note.app, ["--help"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        for expected in ("macOS", "Windows", "Linux", "%s", "system default"):
+            self.assertIn(expected, result.output)
+
     def test_modes_are_validated_before_side_effects(self) -> None:
         self._write_config()
         combined = CliRunner().invoke(note.app, ["Title", "--list"])

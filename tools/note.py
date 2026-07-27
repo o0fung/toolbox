@@ -411,7 +411,13 @@ def note(
         False,
         "-b",
         "--browse",
-        help="Open the selected notes folder in the default web browser.",
+        help=(
+            "Open the selected notes folder in a web browser. Config examples: "
+            'macOS Chrome `open -a "Google Chrome" %s`; '
+            "Windows Chrome `cmd /c start chrome %s` or Edge `cmd /c start msedge %s`; "
+            "Linux Chrome `google-chrome %s` or Firefox `firefox %s`. "
+            "Use null for the system default."
+        ),
     ),
     new_title: Optional[str] = typer.Option(
         None,

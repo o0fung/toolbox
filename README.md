@@ -562,7 +562,14 @@ The configuration is loaded automatically whenever `note` runs:
 
 Editor selection uses the configured `editor`, then `VISUAL`, then `EDITOR`. The platform fallback is Nano on macOS, Nano or Vi on Linux, and Notepad on Windows. Editor commands may include arguments, such as `"code --wait"`.
 
-The `browser` setting is an optional command template for `--browse`; `%s` is replaced with the selected folder’s `file://` URL. Leave it as `null` to use the system default web browser. For example, macOS users can select Google Chrome with `"browser": "open -a \"Google Chrome\" %s"`.
+The `browser` setting is an optional command template for `--browse`; `%s` is required and is replaced with the selected folder’s `file://` URL. Common settings are:
+
+- System default: `"browser": null`
+- macOS Chrome: `"browser": "open -a \"Google Chrome\" %s"`
+- Windows Chrome: `"browser": "cmd /c start chrome %s"`
+- Windows Edge: `"browser": "cmd /c start msedge %s"`
+- Linux Chrome: `"browser": "google-chrome %s"`
+- Linux Firefox: `"browser": "firefox %s"`
 
 ---
 
