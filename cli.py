@@ -10,6 +10,7 @@ Subcommands:
     - cheque:  HK cheque wording (Traditional Chinese + English)
     - pdf:     PDF compression via Ghostscript
     - plot:    CSV plotting with pyqtgraph subplots
+    - note:    timestamped Markdown note management
 
 Examples:
     python cli.py clock                     # full-screen clock
@@ -20,6 +21,7 @@ Examples:
     python cli.py cheque 123.45             # cheque wording with cents
     python cli.py pdf input.pdf             # compress PDF
     python cli.py plot data.csv             # CSV plotting
+    python cli.py note -n "project ideas"    # create and edit a note
 """
 
 from __future__ import annotations
