@@ -475,7 +475,7 @@ def _format_delta_value(delta_value: float, suffix: str = "") -> str:
     return f"{delta_value:+.6g}{suffix}"
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def plot(
     csv_path: Optional[str] = typer.Argument(None, help="Path to CSV file (optional for --config/--config-show)."),
     config: bool = typer.Option(
