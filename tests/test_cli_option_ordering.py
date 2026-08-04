@@ -6,13 +6,13 @@ from typing import List, Sequence, Tuple
 
 try:
     from typer.main import get_command
-    from tools import cheque, clock, note, pdf, plot, youtube
+    from tools import cheque, clock, compress, note, plot, youtube
 except ModuleNotFoundError as exc:  # pragma: no cover - env-dependent
     get_command = None  # type: ignore[assignment]
     cheque = None  # type: ignore[assignment]
     clock = None  # type: ignore[assignment]
+    compress = None  # type: ignore[assignment]
     note = None  # type: ignore[assignment]
-    pdf = None  # type: ignore[assignment]
     plot = None  # type: ignore[assignment]
     youtube = None  # type: ignore[assignment]
     _IMPORT_ERROR = exc
@@ -85,8 +85,10 @@ class CallbackOptionOrderingPhaseOneTests(unittest.TestCase):
         self.assertTrue(show_ctx.params["config_show"])
         self.assertEqual(show_ctx.args, [])
 
-    def test_pdf_accepts_option_after_input_argument(self) -> None:
-        command = get_command(pdf.app)
+    def test_compress_pdf_accepts_option_after_input_argument(self) -> None:
+        root_cmd = get_command(compress.app)
+        command = root_cmd.get_command(None, "pdf")
+        self.assertIsNotNone(command)
         before_ctx = _group_context(command, ["-q", "screen", "/tmp/in.pdf"])
         after_ctx = _group_context(command, ["/tmp/in.pdf", "-q", "screen"])
 
@@ -96,6 +98,21 @@ class CallbackOptionOrderingPhaseOneTests(unittest.TestCase):
 
         self.assertEqual(after_ctx.params["input_pdf"], "/tmp/in.pdf")
         self.assertEqual(after_ctx.params["quality"], "screen")
+        self.assertEqual(after_ctx.args, [])
+
+    def test_compress_video_accepts_option_after_input_argument(self) -> None:
+        root_cmd = get_command(compress.app)
+        command = root_cmd.get_command(None, "video")
+        self.assertIsNotNone(command)
+        before_ctx = _group_context(command, ["--crf", "30", "/tmp/in.mov"])
+        after_ctx = _group_context(command, ["/tmp/in.mov", "--crf", "30"])
+
+        self.assertEqual(before_ctx.params["input_video"], "/tmp/in.mov")
+        self.assertEqual(before_ctx.params["crf"], 30)
+        self.assertEqual(before_ctx.args, [])
+
+        self.assertEqual(after_ctx.params["input_video"], "/tmp/in.mov")
+        self.assertEqual(after_ctx.params["crf"], 30)
         self.assertEqual(after_ctx.args, [])
 
     def test_youtube_accepts_option_after_url_argument(self) -> None:
