@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import unittest
-import warnings
-from typing import List, Sequence, Tuple
+from typing import Sequence, Tuple
 
 try:
     from typer.main import get_command
@@ -22,13 +21,6 @@ else:
 
 def _group_context(command, args: Sequence[str]):
     return command.make_context(command.name or "tool", list(args), resilient_parsing=True)
-
-
-def _split_group_tokens(ctx) -> List[str]:
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        protected = list(getattr(ctx, "protected_args", []) or [])
-    return protected + list(ctx.args)
 
 
 @unittest.skipIf(get_command is None, f"Missing dependency: {_IMPORT_ERROR}")
@@ -166,15 +158,17 @@ class ClockOptionOrderingPhaseTwoTests(unittest.TestCase):
     def _parse_clock_subcommand(self, args: Sequence[str]) -> Tuple[object, str, object]:
         root_cmd = get_command(clock.app)
         root_ctx = _group_context(root_cmd, args)
-        # Parse clock in two stages (group then subcommand) to verify callback
-        # vs subcommand option ownership without invoking runtime side effects.
-        tokens = _split_group_tokens(root_ctx)
-        self.assertTrue(tokens, "clock parse must include a subcommand token")
+        subcommands = set(root_cmd.commands)
+        sub_index = next((index for index, token in enumerate(args) if token in subcommands), None)
+        self.assertIsNotNone(sub_index, "clock parse must include a subcommand token")
 
-        sub_name = tokens[0]
+        # Parse clock in two stages without invoking runtime side effects:
+        # first let the parent consume only its options, then feed the
+        # post-subcommand tokens to the selected subcommand parser.
+        sub_name = args[sub_index]
         sub_cmd = root_cmd.get_command(root_ctx, sub_name)
         self.assertIsNotNone(sub_cmd, f"unknown subcommand: {sub_name}")
-        sub_ctx = sub_cmd.make_context(sub_name, tokens[1:], parent=root_ctx, resilient_parsing=True)
+        sub_ctx = sub_cmd.make_context(sub_name, list(args[sub_index + 1 :]), parent=root_ctx, resilient_parsing=True)
         return root_ctx, sub_name, sub_ctx
 
     def test_clock_keeps_parent_options_before_subcommand(self) -> None:

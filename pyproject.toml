@@ -20,6 +20,7 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
+    "click>=8.4.2",
     "numpy>=2.0.0",
     "PyQt6>=6.7.0",
     "pyqtgraph>=0.13.7",
