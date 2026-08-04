@@ -7,7 +7,7 @@ name = "lf-toolbox"
 version = "1.14.1"
 description = "CLI toolbox with tree/work, YouTube helpers, terminal clock, cheque wording, file compression, CSV plotting, and Markdown notes."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = "MIT"
 authors = [
     { name = "lf" }

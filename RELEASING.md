@@ -1,6 +1,7 @@
-# Releasing `lf-toolbox` to PyPI (via GitHub Release)
+# Releasing `lf-toolbox` to PyPI (via Git tag)
 
-This project is configured to publish to PyPI automatically from GitHub Actions when a GitHub Release is published.
+This project publishes to PyPI automatically when a version tag matching
+`v*.*.*` is pushed to GitHub. Creating a GitHub Release is not required.
 
 Workflow file: `.github/workflows/publish-pypi.yml`
 
@@ -67,15 +68,16 @@ git push origin main --tags
 
 Tag rule: the workflow expects tag `vX.Y.Z` to match `project.version` exactly (without the leading `v`).
 
-### 4) Publish GitHub Release
+### 4) Automated PyPI publish
 
-Create a GitHub Release from tag `vX.Y.Z` and click **Publish release**.
-
-This triggers `.github/workflows/publish-pypi.yml`, which:
+Pushing the version tag triggers `.github/workflows/publish-pypi.yml`, which:
 
 1. Builds sdist and wheel.
 2. Runs `twine check`.
 3. Publishes to PyPI using OIDC trusted publishing.
+
+The workflow runs only for tags matching `v*.*.*`. Do not use arbitrary tags
+for package releases; PyPI does not allow a version to be uploaded twice.
 
 ### 5) Verify end-user install path
 

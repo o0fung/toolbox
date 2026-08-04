@@ -1,18 +1,20 @@
 name: Publish Python package to PyPI
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v*.*.*"
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
-  build:
-    if: ${{ !github.event.release.prerelease }}
+  publish:
     runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.meta.outputs.version }}
+    environment:
+      name: pypi
+      url: https://pypi.org/p/lf-toolbox
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -28,9 +30,8 @@ jobs:
           python -m pip install build twine
 
       - name: Validate release tag and package version
-        id: meta
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           VERSION=$(python - <<'PY'
           import pathlib
@@ -54,28 +55,6 @@ jobs:
 
       - name: Check distributions
         run: python -m twine check dist/*
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: python-dist
-          path: dist/*
-
-  publish:
-    if: ${{ !github.event.release.prerelease }}
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/p/lf-toolbox
-    permissions:
-      id-token: write
-    steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: python-dist
-          path: dist
 
       - name: Publish package to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

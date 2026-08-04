@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -17,6 +18,9 @@ except ModuleNotFoundError as exc:  # pragma: no cover - env-dependent
     _IMPORT_ERROR = exc
 else:
     _IMPORT_ERROR = None
+
+
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 @unittest.skipIf(plot is None, f"Missing dependency: {_IMPORT_ERROR}")
@@ -232,7 +236,10 @@ class PlotToolTests(unittest.TestCase):
         runner = CliRunner()
         result = runner.invoke(plot.app, [])
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("FILE is required unless --config or --config-show is used.", result.output)
+        self.assertIn(
+            "FILE is required unless --config or --config-show is used.",
+            _ANSI_ESCAPE.sub("", result.output),
+        )
 
 
 if __name__ == "__main__":
