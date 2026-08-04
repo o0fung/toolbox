@@ -64,7 +64,7 @@ pip install -U --force-reinstall "git+https://github.com/o0fung/toolbox.git"
 
 ## Publish to PyPI
 
-See `RELEASING.md` for the GitHub Release -> GitHub Actions -> PyPI publish checklist.
+See `RELEASING.md` for the Git tag -> GitHub Actions -> PyPI publish checklist.
 
 ## Usage
 
