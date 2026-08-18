@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import typer
 
-from . import cheque, clock, note, pdf, plot, tree, youtube
+from . import cheque, clock, compress, note, plot, tree, youtube
 
 
 @dataclass(frozen=True)
@@ -23,7 +23,7 @@ TOOL_COMMANDS: tuple[ToolCommand, ...] = (
     ToolCommand(name="youtube", app=youtube.app, invoke_without_command=True),
     ToolCommand(name="clock", app=clock.app, invoke_without_command=True),
     ToolCommand(name="cheque", app=cheque.app, invoke_without_command=True),
-    ToolCommand(name="pdf", app=pdf.app, invoke_without_command=True),
+    ToolCommand(name="compress", app=compress.app, invoke_without_command=False),
     ToolCommand(name="plot", app=plot.app, invoke_without_command=True),
     ToolCommand(name="note", app=note.app, invoke_without_command=True),
 )
@@ -34,7 +34,7 @@ __all__ = [
     "youtube",
     "clock",
     "cheque",
-    "pdf",
+    "compress",
     "plot",
     "note",
     "ToolCommand",

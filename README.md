@@ -9,7 +9,7 @@ A set of useful command-line tools for enhancing productivity.
 - **youtube**: Download YouTube videos, audio, and subtitles, or display video metadata.
 - **clock**: Full-screen seven-segment terminal clock with stopwatch and countdown.
 - **cheque**: Convert HKD amounts (supports cents) to formal HK cheque wording in Traditional Chinese and English.
-- **pdf**: Compress PDF files using Ghostscript quality presets.
+- **compress**: Compress PDF files with Ghostscript and videos to smaller MP4 files with FFmpeg.
 - **plot**: Plot CSV data with pyqtgraph subplots.
 - **note**: Create, organize, list, and open timestamped Markdown notes.
 
@@ -64,7 +64,7 @@ pip install -U --force-reinstall "git+https://github.com/o0fung/toolbox.git"
 
 ## Publish to PyPI
 
-See `RELEASING.md` for the GitHub Release -> GitHub Actions -> PyPI publish checklist.
+See `RELEASING.md` for the Git tag -> GitHub Actions -> PyPI publish checklist.
 
 ## Usage
 
@@ -308,48 +308,69 @@ Notes:
 
 ---
 
-## 🚩 pdf
+## 🚩 compress
 
-Compress PDF files via Ghostscript.
+Compress files. PDFs use Ghostscript quality presets; videos use FFmpeg to produce smaller H.264/AAC MP4 files.
 
 Usage:
 ```sh
 # From the repo
-python cli.py pdf INPUT.pdf [options]
+python cli.py compress pdf INPUT.pdf [options]
+python cli.py compress video INPUT.mov [options]
 
 # Installed entrypoint
-lf pdf INPUT.pdf [options]
+lf compress pdf INPUT.pdf [options]
+lf compress video INPUT.mov [options]
 ```
 
-Options:
+PDF options:
 - `INPUT.pdf` (required): Source PDF file path.
 - `-o, --out PATH`: Output PDF path. Default is `<input_stem>_compressed.pdf` in the same folder.
 - `-q, --quality`: Compression profile. One of: `screen`, `ebook` (default), `printer`, `prepress`, `default`.
 
+Video options:
+- `INPUT.mov` / video path (required): Source video file path.
+- `-o, --out PATH`: Output MP4 path. Default is `<input_stem>_compressed.mp4` in the same folder.
+- `-w, --width`: Output width in pixels. Default: `1280`; height is calculated automatically.
+- `--crf`: x264 quality factor from `0` to `51`. Default: `28`; higher means smaller file and lower quality.
+- `-p, --preset`: x264 preset. Default: `slow`.
+- `--overwrite`: Allow replacing an existing output file.
+
 Examples:
 ```sh
-# Default profile (ebook)
-lf pdf ~/Desktop/report.pdf
+# Default PDF profile (ebook)
+lf compress pdf ~/Desktop/report.pdf
 
 # Stronger compression for on-screen reading
-lf pdf ~/Desktop/report.pdf -q screen
+lf compress pdf ~/Desktop/report.pdf -q screen
 
 # Keep higher print quality and choose output path
-lf pdf ~/Desktop/report.pdf -q printer -o ~/Desktop/report_print.pdf
+lf compress pdf ~/Desktop/report.pdf -q printer -o ~/Desktop/report_print.pdf
 
-# Option before positional
-lf pdf -q printer ~/Desktop/report.pdf
+# Compress a large MOV to a smaller MP4
+lf compress video ~/Desktop/input.mov
+
+# Equivalent to: ffmpeg -i input.mov -vf scale=1280:-2 -c:v libx264 -crf 28 -preset slow -c:a aac output.mp4
+lf compress video ~/Desktop/input.mov -o ~/Desktop/output.mp4
+
+# Smaller video file with lower quality
+lf compress video ~/Desktop/input.mov --crf 32
 
 # Option after positional (equivalent)
-lf pdf ~/Desktop/report.pdf -q printer
+lf compress pdf ~/Desktop/report.pdf -q printer
+lf compress video ~/Desktop/input.mov --crf 30
 ```
 
 Notes:
 - Requires Ghostscript (`gs`) installed and available on PATH.
 - macOS install: `brew install ghostscript`
 - Missing `gs` can trigger an interactive install prompt (`y/N`) using an available package manager (e.g. brew/apt/dnf/yum/pacman/zypper/winget/choco).
+- Video compression requires FFmpeg (`ffmpeg`) installed and available on PATH.
+- macOS install: `brew install ffmpeg`
+- Missing `ffmpeg` can trigger the same interactive install prompt flow.
 - Output path must be different from input path.
 - Compression ratio depends on source content (embedded images/fonts/compression).
+- Video output is always MP4. The scaler uses `-2` for height so FFmpeg keeps the aspect ratio while choosing an even H.264-compatible height.
 
 ---
 
@@ -598,13 +619,13 @@ tools/
 	youtube.py    # YouTube downloader tool
 	clock.py      # Full-screen seven-segment terminal clock
 	cheque.py     # HK cheque wording (Chinese + English)
-	pdf.py        # PDF compression via Ghostscript
+	compress.py   # PDF/video compression helpers
 	plot.py       # CSV plotting with pyqtgraph (PyQt6)
 	note.py       # Timestamped Markdown note manager
 tests/
 	test_cheque.py
 	test_note.py
-	test_pdf.py
+	test_compress.py
 	test_tree.py
 ```
 

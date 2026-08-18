@@ -16,6 +16,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import click
 import typer
 from rich import print
+from typer.core import TyperOption
 
 try:
     from ._cli_common import new_typer_app
@@ -48,6 +49,25 @@ _CONFIG_OPTION_KEYS = {
 }
 _DEFAULT_PLOT_CONFIG_PROFILE = "default"
 _DEFAULT_PLOT_CONFIG_PATH = os.path.expanduser("~/.config/lf-toolbox/plot.defaults.json")
+_s_plot_typer_option_init = TyperOption.__init__
+
+
+def _plot_typer_option_init(self, *args, **kwargs):
+    # Typer 0.16 still accepts flag_value= on Option() but does not forward it
+    # to Click. Click needs flag_value + _flag_needs_value so plot `--config`
+    # can be used two ways:
+    # 1) `--config` / trailing `--config` -> profile "default"
+    # 2) `--config imu` -> named profile
+    # Skip boolean `--config` flags (e.g. note) so they keep true/false parsing.
+    # Without this, Click treats plot `--config` as a required string and
+    # `lf plot --config` fails instead of opening the config file.
+    _s_plot_typer_option_init(self, *args, **kwargs)
+    if "--config" in self.opts and not self.is_bool_flag:
+        self.flag_value = _DEFAULT_PLOT_CONFIG_PROFILE
+        self._flag_needs_value = True
+
+
+TyperOption.__init__ = _plot_typer_option_init  # type: ignore[method-assign]
 
 
 def _default_plot_profile_payload() -> Dict[str, object]:
@@ -572,7 +592,7 @@ def _format_delta_value(delta_value: float, suffix: str = "") -> str:
     return f"{delta_value:+.6g}{suffix}"
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def plot(
     csv_path: Optional[str] = typer.Argument(None, help="Path to CSV file (optional for --config/--config-show)."),
     config: Optional[str] = typer.Option(
@@ -580,8 +600,6 @@ def plot(
         "-c",
         "--config",
         help="Load a config profile from ~/.config/lf-toolbox/plot.defaults.json. Defaults to profile 'default'. Explicit CLI flags override config values.",
-        is_flag=False,
-        flag_value=_DEFAULT_PLOT_CONFIG_PROFILE,
         metavar="[PROFILE]",
     ),
     config_show: bool = typer.Option(
