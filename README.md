@@ -367,7 +367,7 @@ lf plot [FILE] [options]
 **Key Options:**
 - `FILE` (required for plotting): CSV/TSV file path. Not required for `--config-show`, or for `--config` with no plotting.
 - `-d, --delimiter DELIM`: Force delimiter (auto-sniff if omitted across , \t ; | space).
-- `-c, --config`: Load default plot options from `~/.config/lf-toolbox/plot.defaults.json`. Explicit CLI flags override config values.
+- `-c, --config [PROFILE]`: Load a plot config profile from `~/.config/lf-toolbox/plot.defaults.json`. Omitting `PROFILE` uses `default`. Explicit CLI flags override config values.
 - `--config-show`: Create/open `~/.config/lf-toolbox/plot.defaults.json` in your editor (or system opener) and exit.
 - `-t, --title TEXT`: Window title.
 - `-x, --xcol NAME|INDEX`: Column to use as X axis (time-like, numeric, or fallback to row indices). Default: first column.
@@ -378,14 +378,16 @@ lf plot [FILE] [options]
 - `-w, --weight FLOAT`: Width/size control (in pixels, default 1.0). In line mode it sets line width; in `--points-only` mode it sets marker size and marker outline width.
 - `-o, --out-path PATH`: Output PNG path or directory (implies `--export` if not explicitly provided). If a directory or ends with a path separator, the file name `<csv_basename>.png` is used. `.png` extension appended if missing.
 
-**Config file (`--config`)**
-- Supported keys: `delimiter`, `title`, `scale`, `export`, `out_path`, `xcol`, `ycols`, `xlim`, `weight`, `points_only`.
+**Config file (`--config [PROFILE]`)**
+- Config root is a JSON object whose keys are profile names. `-c` uses the `default` profile; `-c imu` uses the `imu` profile.
+- Each profile supports: `delimiter`, `title`, `scale`, `export`, `out_path`, `xcol`, `ycols`, `xlim`, `weight`, `points_only`.
 - `xcol` accepts string or integer.
 - `ycols` accepts either comma-separated string (`"20,21,22"`) or a list (`[20, 21, 22]`).
 - Precedence: explicit CLI flags always win over config values.
 - Config path is fixed: `~/.config/lf-toolbox/plot.defaults.json`.
 - `--config-show` creates the file if missing, opens it for editing, then exits.
 - `--config` without `FILE` also opens the config file and exits.
+- Old flat config files are migrated automatically to `{ "default": { ...old options... } }` with a timestamped `.bak` backup next to the original file.
 
 **Automatic X-axis detection:**
 1. If selected x column parses as (mostly) datetimes or epoch seconds/milliseconds -> time axis (DateAxisItem).
@@ -436,11 +438,14 @@ lf plot --config-show
 # Quick edit flow (also opens config and exits)
 lf plot --config
 
-# Reuse defaults from fixed config path
+# Reuse the default profile from fixed config path
 lf plot data.csv --config
 
+# Reuse a named profile
+lf plot data.csv --config imu
+
 # Override one config value for a specific run
-lf plot data.csv --config -x 6
+lf plot data.csv --config imu -x 6
 
 # Export a high-res PNG (no GUI)
 lf plot data.csv -y acc_x,acc_y,acc_z -e
@@ -461,9 +466,17 @@ lf plot data.csv --points-only -w 1
 Example `~/.config/lf-toolbox/plot.defaults.json`:
 ```json
 {
-  "xcol": 6,
-  "ycols": [20, 21, 22, 23, 24, 25, 11, 12, 14, 9, 10, 15, 16],
-  "scale": 0.02
+  "default": {
+    "xcol": 6,
+    "ycols": [20, 21, 22, 23, 24, 25, 11, 12, 14, 9, 10, 15, 16],
+    "scale": 0.02
+  },
+  "imu": {
+    "xcol": "frame_id",
+    "ycols": ["acc_x", "acc_y", "acc_z"],
+    "scale": 0.02,
+    "points_only": true
+  }
 }
 ```
 

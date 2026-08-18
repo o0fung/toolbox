@@ -88,7 +88,9 @@ class PlotToolTests(unittest.TestCase):
         self.assertEqual(applied_xlim, (21.0, 23.0))
 
     def test_load_plot_config_accepts_valid_json(self) -> None:
-        path = self._write_temp_json({"scale": 0.02, "xcol": 6, "ycols": [20, 21, "22"], "xlim": "10,20"})
+        path = self._write_temp_json(
+            {"default": {"scale": 0.02, "xcol": 6, "ycols": [20, 21, "22"], "xlim": "10,20"}}
+        )
         try:
             loaded = plot._load_plot_config(path)
         finally:
@@ -99,8 +101,24 @@ class PlotToolTests(unittest.TestCase):
         self.assertEqual(loaded["ycols"], "20,21,22")
         self.assertEqual(loaded["xlim"], "10,20")
 
+    def test_load_plot_config_accepts_named_profile(self) -> None:
+        path = self._write_temp_json(
+            {
+                "default": {"scale": 1.0},
+                "imu": {"scale": 0.02, "xcol": "frame_id", "ycols": ["acc_x", "acc_y", "acc_z"]},
+            }
+        )
+        try:
+            loaded = plot._load_plot_config_profile(path, "imu")
+        finally:
+            os.unlink(path)
+
+        self.assertEqual(loaded["scale"], 0.02)
+        self.assertEqual(loaded["xcol"], "frame_id")
+        self.assertEqual(loaded["ycols"], "acc_x,acc_y,acc_z")
+
     def test_load_plot_config_accepts_null_xcol_and_ycols(self) -> None:
-        path = self._write_temp_json({"xcol": None, "ycols": None, "scale": 1.0})
+        path = self._write_temp_json({"default": {"xcol": None, "ycols": None, "scale": 1.0}})
         try:
             loaded = plot._load_plot_config(path)
         finally:
@@ -110,14 +128,14 @@ class PlotToolTests(unittest.TestCase):
         self.assertIsNone(loaded["ycols"])
 
     def test_load_plot_config_rejects_invalid_xcol_and_ycols_types(self) -> None:
-        xcol_path = self._write_temp_json({"xcol": {"bad": "type"}})
+        xcol_path = self._write_temp_json({"default": {"xcol": {"bad": "type"}}})
         try:
             with self.assertRaises(typer.BadParameter):
                 plot._load_plot_config(xcol_path)
         finally:
             os.unlink(xcol_path)
 
-        ycols_path = self._write_temp_json({"ycols": 123.45})
+        ycols_path = self._write_temp_json({"default": {"ycols": 123.45}})
         try:
             with self.assertRaises(typer.BadParameter):
                 plot._load_plot_config(ycols_path)
@@ -142,8 +160,24 @@ class PlotToolTests(unittest.TestCase):
         finally:
             os.unlink(bad_path)
 
+    def test_load_plot_config_rejects_missing_profile(self) -> None:
+        path = self._write_temp_json({"default": {"scale": 1.0}})
+        try:
+            with self.assertRaises(typer.BadParameter):
+                plot._load_plot_config_profile(path, "imu")
+        finally:
+            os.unlink(path)
+
+    def test_load_plot_config_rejects_invalid_profile_type(self) -> None:
+        path = self._write_temp_json({"default": {"scale": 1.0}, "imu": ["bad"]})
+        try:
+            with self.assertRaises(typer.BadParameter):
+                plot._load_plot_config_profile(path, "imu")
+        finally:
+            os.unlink(path)
+
     def test_load_plot_config_rejects_unknown_keys(self) -> None:
-        path = self._write_temp_json({"scale": 1.0, "unexpected_key": 1})
+        path = self._write_temp_json({"default": {"scale": 1.0, "unexpected_key": 1}})
         try:
             with self.assertRaises(typer.BadParameter):
                 plot._load_plot_config(path)
@@ -151,7 +185,7 @@ class PlotToolTests(unittest.TestCase):
             os.unlink(path)
 
     def test_load_plot_config_rejects_wrong_types(self) -> None:
-        path = self._write_temp_json({"scale": "fast"})
+        path = self._write_temp_json({"default": {"scale": "fast"}})
         try:
             with self.assertRaises(typer.BadParameter):
                 plot._load_plot_config(path)
@@ -184,8 +218,9 @@ class PlotToolTests(unittest.TestCase):
 
         with open(plot._DEFAULT_PLOT_CONFIG_PATH, "r", encoding="utf-8") as handle:
             loaded = json.load(handle)
-        self.assertEqual(loaded["scale"], 1.0)
-        self.assertIsNone(loaded["ycols"])
+        self.assertIn("default", loaded)
+        self.assertEqual(loaded["default"]["scale"], 1.0)
+        self.assertIsNone(loaded["default"]["ycols"])
 
     def test_default_generated_config_is_loadable(self) -> None:
         created = plot._ensure_plot_config_file(plot._DEFAULT_PLOT_CONFIG_PATH)
@@ -195,6 +230,41 @@ class PlotToolTests(unittest.TestCase):
         self.assertIsNone(loaded["xcol"])
         self.assertIsNone(loaded["ycols"])
         self.assertEqual(loaded["scale"], 1.0)
+
+    def test_migrate_legacy_plot_config_wraps_default_profile_and_creates_backup(self) -> None:
+        with open(plot._DEFAULT_PLOT_CONFIG_PATH, "w", encoding="utf-8") as handle:
+            json.dump({"scale": 0.02, "xcol": 6}, handle)
+
+        migrated = plot._migrate_legacy_plot_config_if_needed(plot._DEFAULT_PLOT_CONFIG_PATH)
+
+        self.assertTrue(migrated)
+        with open(plot._DEFAULT_PLOT_CONFIG_PATH, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        self.assertEqual(loaded, {"default": {"scale": 0.02, "xcol": 6}})
+        backups = [
+            name
+            for name in os.listdir(self._temp_dir.name)
+            if name.startswith("plot.defaults.json.bak-")
+        ]
+        self.assertEqual(len(backups), 1)
+
+    def test_migrate_profiled_plot_config_does_not_rewrite(self) -> None:
+        payload = {"default": {"scale": 0.02}, "imu": {"xcol": "frame_id"}}
+        with open(plot._DEFAULT_PLOT_CONFIG_PATH, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+
+        migrated = plot._migrate_legacy_plot_config_if_needed(plot._DEFAULT_PLOT_CONFIG_PATH)
+
+        self.assertFalse(migrated)
+        with open(plot._DEFAULT_PLOT_CONFIG_PATH, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        self.assertEqual(loaded, payload)
+        backups = [
+            name
+            for name in os.listdir(self._temp_dir.name)
+            if name.startswith("plot.defaults.json.bak-")
+        ]
+        self.assertEqual(backups, [])
 
     def test_ensure_plot_config_file_does_not_overwrite_existing_file(self) -> None:
         with open(plot._DEFAULT_PLOT_CONFIG_PATH, "w", encoding="utf-8") as handle:

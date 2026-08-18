@@ -46,10 +46,11 @@ _CONFIG_OPTION_KEYS = {
     "weight",
     "points_only",
 }
+_DEFAULT_PLOT_CONFIG_PROFILE = "default"
 _DEFAULT_PLOT_CONFIG_PATH = os.path.expanduser("~/.config/lf-toolbox/plot.defaults.json")
 
 
-def _default_plot_config_payload() -> Dict[str, object]:
+def _default_plot_profile_payload() -> Dict[str, object]:
     return {
         "delimiter": None,
         "title": None,
@@ -62,6 +63,10 @@ def _default_plot_config_payload() -> Dict[str, object]:
         "weight": 1.0,
         "points_only": False,
     }
+
+
+def _default_plot_config_payload() -> Dict[str, object]:
+    return {_DEFAULT_PLOT_CONFIG_PROFILE: _default_plot_profile_payload()}
 
 
 def _ensure_plot_config_file(path: str) -> bool:
@@ -81,6 +86,53 @@ def _ensure_plot_config_file(path: str) -> bool:
             handle.write("\n")
     except OSError as exc:
         raise typer.BadParameter(f"Cannot write config file '{expanded_path}': {exc}") from exc
+    return True
+
+
+def _is_legacy_plot_config_payload(payload: Dict[str, object]) -> bool:
+    return all(key in _CONFIG_OPTION_KEYS for key in payload)
+
+
+def _next_backup_path(path: str) -> str:
+    stamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+    candidate = f"{path}.bak-{stamp}"
+    if not os.path.exists(candidate):
+        return candidate
+
+    suffix = 1
+    while True:
+        indexed_candidate = f"{candidate}-{suffix}"
+        if not os.path.exists(indexed_candidate):
+            return indexed_candidate
+        suffix += 1
+
+
+def _migrate_legacy_plot_config_if_needed(path: str) -> bool:
+    expanded_path = os.path.expanduser(path)
+    if not os.path.isfile(expanded_path):
+        return False
+
+    try:
+        with open(expanded_path, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return False
+
+    if not isinstance(loaded, dict) or not _is_legacy_plot_config_payload(loaded):
+        return False
+
+    backup_path = _next_backup_path(expanded_path)
+    try:
+        with open(backup_path, "x", encoding="utf-8") as backup_handle:
+            json.dump(loaded, backup_handle, indent=2)
+            backup_handle.write("\n")
+        with open(expanded_path, "w", encoding="utf-8") as config_handle:
+            json.dump({_DEFAULT_PLOT_CONFIG_PROFILE: loaded}, config_handle, indent=2)
+            config_handle.write("\n")
+    except OSError as exc:
+        raise typer.BadParameter(f"Cannot migrate config file '{expanded_path}': {exc}") from exc
+
+    print(f"[yellow]Migrated legacy plot config[/yellow]: {expanded_path} (backup: {backup_path})")
     return True
 
 
@@ -157,10 +209,12 @@ def _normalize_plot_config_value(key: str, value: object) -> object:
     raise typer.BadParameter(f"Unsupported config key: {key}")
 
 
-def _load_plot_config(path: str) -> Dict[str, object]:
+def _load_plot_config_profile(path: str, profile_name: str) -> Dict[str, object]:
     expanded_path = os.path.expanduser(path)
     if not os.path.isfile(expanded_path):
         raise typer.BadParameter(f"Config file not found: {expanded_path}")
+
+    _migrate_legacy_plot_config_if_needed(expanded_path)
 
     try:
         with open(expanded_path, "r", encoding="utf-8") as handle:
@@ -173,14 +227,30 @@ def _load_plot_config(path: str) -> Dict[str, object]:
     if not isinstance(loaded, dict):
         raise typer.BadParameter("Config file root must be a JSON object")
 
-    unknown_keys = sorted(set(loaded.keys()) - _CONFIG_OPTION_KEYS)
+    if profile_name not in loaded:
+        available_profiles = ", ".join(sorted(loaded)) or "(none)"
+        raise typer.BadParameter(
+            f"Config profile '{profile_name}' not found in {expanded_path}. Available profiles: {available_profiles}"
+        )
+
+    profile_values = loaded[profile_name]
+    if not isinstance(profile_values, dict):
+        raise typer.BadParameter(f"Config profile '{profile_name}' must be a JSON object")
+
+    unknown_keys = sorted(set(profile_values.keys()) - _CONFIG_OPTION_KEYS)
     if unknown_keys:
-        raise typer.BadParameter(f"Unsupported config keys: {', '.join(unknown_keys)}")
+        raise typer.BadParameter(
+            f"Unsupported config keys in profile '{profile_name}': {', '.join(unknown_keys)}"
+        )
 
     normalized: Dict[str, object] = {}
-    for key, value in loaded.items():
+    for key, value in profile_values.items():
         normalized[key] = _normalize_plot_config_value(key, value)
     return normalized
+
+
+def _load_plot_config(path: str) -> Dict[str, object]:
+    return _load_plot_config_profile(path, _DEFAULT_PLOT_CONFIG_PROFILE)
 
 
 def _merge_plot_options(
@@ -199,6 +269,33 @@ def _merge_plot_options(
             continue
         merged[key] = value
     return merged
+
+
+def _looks_like_csv_path_token(value: str) -> bool:
+    expanded = os.path.expanduser(value)
+    _root, ext = os.path.splitext(expanded)
+    known_data_exts = {".csv", ".tsv", ".txt"}
+    return (
+        ext.lower() in known_data_exts
+        or os.sep in value
+        or (os.altsep is not None and os.altsep in value)
+    )
+
+
+def _resolve_config_request(config: Optional[str], csv_path: Optional[str]) -> Tuple[bool, str, Optional[str]]:
+    if config is None:
+        return False, _DEFAULT_PLOT_CONFIG_PROFILE, csv_path
+
+    profile_name = config.strip() or _DEFAULT_PLOT_CONFIG_PROFILE
+
+    # `-c [PROFILE]` creates one unavoidable ambiguity: `-c data.csv` can mean
+    # either "default profile + FILE" (old option-before-file style) or profile
+    # "data.csv" with no FILE. Prefer the data-file interpretation for path-like
+    # tokens so existing `--config data.csv` workflows keep plotting.
+    if csv_path is None and _looks_like_csv_path_token(profile_name):
+        return True, _DEFAULT_PLOT_CONFIG_PROFILE, profile_name
+
+    return True, profile_name, csv_path
 
 
 @dataclass
@@ -478,11 +575,14 @@ def _format_delta_value(delta_value: float, suffix: str = "") -> str:
 @app.callback()
 def plot(
     csv_path: Optional[str] = typer.Argument(None, help="Path to CSV file (optional for --config/--config-show)."),
-    config: bool = typer.Option(
-        False,
+    config: Optional[str] = typer.Option(
+        None,
         "-c",
         "--config",
-        help="Load defaults from ~/.config/lf-toolbox/plot.defaults.json. Explicit CLI flags override config values.",
+        help="Load a config profile from ~/.config/lf-toolbox/plot.defaults.json. Defaults to profile 'default'. Explicit CLI flags override config values.",
+        is_flag=False,
+        flag_value=_DEFAULT_PLOT_CONFIG_PROFILE,
+        metavar="[PROFILE]",
     ),
     config_show: bool = typer.Option(
         False,
@@ -545,28 +645,33 @@ def plot(
         "points_only": points_only,
     }
 
-    # Config mode has two explicit states:
-    # 1) --config-show always ensures + opens the default file, then exits.
-    # 2) --config loads defaults from that file only when plotting is requested.
-    # This ordering keeps edit-first workflow predictable and avoids accidental
-    # plotting when the user's intent is to modify presets.
+    config_enabled, config_profile, csv_path = _resolve_config_request(config, csv_path)
+
+    # Config mode has three explicit states:
+    # 1) --config-show ensures/migrates/opens the file, then exits,
+    # 2) --config with no data file opens the file for preset editing,
+    # 3) --config with a data file loads the selected profile before plotting.
+    # The migration step happens before both editing and loading so old flat
+    # configs become profile maps once, with a backup kept beside the original.
     if config_show:
         created = _ensure_plot_config_file(_DEFAULT_PLOT_CONFIG_PATH)
+        _migrate_legacy_plot_config_if_needed(_DEFAULT_PLOT_CONFIG_PATH)
         if created:
             print(f"[green]Created default plot config[/green]: {_DEFAULT_PLOT_CONFIG_PATH}")
         _open_path_for_edit(_DEFAULT_PLOT_CONFIG_PATH)
         print(f"Opened plot config: {_DEFAULT_PLOT_CONFIG_PATH}")
         raise typer.Exit()
 
-    if config and csv_path is None:
+    if config_enabled and csv_path is None:
         created = _ensure_plot_config_file(_DEFAULT_PLOT_CONFIG_PATH)
+        _migrate_legacy_plot_config_if_needed(_DEFAULT_PLOT_CONFIG_PATH)
         if created:
             print(f"[green]Created default plot config[/green]: {_DEFAULT_PLOT_CONFIG_PATH}")
         _open_path_for_edit(_DEFAULT_PLOT_CONFIG_PATH)
         print(f"Opened plot config: {_DEFAULT_PLOT_CONFIG_PATH}")
         raise typer.Exit()
 
-    if config:
+    if config_enabled:
         _ensure_plot_config_file(_DEFAULT_PLOT_CONFIG_PATH)
         click_ctx = click.get_current_context(silent=True)
         explicit_keys: set[str] = set()
@@ -576,7 +681,7 @@ def plot(
                 if source == click.core.ParameterSource.COMMANDLINE:
                     explicit_keys.add(name)
 
-        config_values = _load_plot_config(_DEFAULT_PLOT_CONFIG_PATH)
+        config_values = _load_plot_config_profile(_DEFAULT_PLOT_CONFIG_PATH, config_profile)
         merged = _merge_plot_options(cli_values, config_values, explicit_keys)
         delimiter = merged["delimiter"]  # type: ignore[assignment]
         title = merged["title"]  # type: ignore[assignment]
@@ -588,7 +693,7 @@ def plot(
         xlim = merged["xlim"]  # type: ignore[assignment]
         weight = merged["weight"]  # type: ignore[assignment]
         points_only = merged["points_only"]  # type: ignore[assignment]
-        print(f"Loaded plot config: {_DEFAULT_PLOT_CONFIG_PATH}")
+        print(f"Loaded plot config profile '{config_profile}': {_DEFAULT_PLOT_CONFIG_PATH}")
 
     if csv_path is None:
         raise typer.BadParameter("FILE is required unless --config or --config-show is used.")

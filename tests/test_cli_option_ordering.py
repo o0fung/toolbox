@@ -46,17 +46,48 @@ class CallbackOptionOrderingPhaseOneTests(unittest.TestCase):
         self.assertEqual(after_ctx.params["xlim"], "1,2")
         self.assertEqual(after_ctx.args, [])
 
-    def test_plot_accepts_boolean_config_option_before_or_after_csv_argument(self) -> None:
+    def test_plot_accepts_config_option_before_or_after_csv_argument(self) -> None:
         command = get_command(plot.app)
         before_ctx = _group_context(command, ["--config", "/tmp/data.csv"])
         after_ctx = _group_context(command, ["/tmp/data.csv", "--config"])
 
-        self.assertEqual(before_ctx.params["csv_path"], "/tmp/data.csv")
-        self.assertTrue(before_ctx.params["config"])
+        before_enabled, before_profile, before_csv_path = plot._resolve_config_request(
+            before_ctx.params["config"], before_ctx.params["csv_path"]
+        )
+        after_enabled, after_profile, after_csv_path = plot._resolve_config_request(
+            after_ctx.params["config"], after_ctx.params["csv_path"]
+        )
+
+        self.assertTrue(before_enabled)
+        self.assertEqual(before_profile, "default")
+        self.assertEqual(before_csv_path, "/tmp/data.csv")
         self.assertEqual(before_ctx.args, [])
 
-        self.assertEqual(after_ctx.params["csv_path"], "/tmp/data.csv")
-        self.assertTrue(after_ctx.params["config"])
+        self.assertTrue(after_enabled)
+        self.assertEqual(after_profile, "default")
+        self.assertEqual(after_csv_path, "/tmp/data.csv")
+        self.assertEqual(after_ctx.args, [])
+
+    def test_plot_accepts_config_profile_before_or_after_csv_argument(self) -> None:
+        command = get_command(plot.app)
+        before_ctx = _group_context(command, ["--config", "imu", "/tmp/data.csv"])
+        after_ctx = _group_context(command, ["/tmp/data.csv", "--config", "imu"])
+
+        before_enabled, before_profile, before_csv_path = plot._resolve_config_request(
+            before_ctx.params["config"], before_ctx.params["csv_path"]
+        )
+        after_enabled, after_profile, after_csv_path = plot._resolve_config_request(
+            after_ctx.params["config"], after_ctx.params["csv_path"]
+        )
+
+        self.assertTrue(before_enabled)
+        self.assertEqual(before_profile, "imu")
+        self.assertEqual(before_csv_path, "/tmp/data.csv")
+        self.assertEqual(before_ctx.args, [])
+
+        self.assertTrue(after_enabled)
+        self.assertEqual(after_profile, "imu")
+        self.assertEqual(after_csv_path, "/tmp/data.csv")
         self.assertEqual(after_ctx.args, [])
 
     def test_plot_accepts_config_show_option_before_or_after_csv_argument(self) -> None:
@@ -78,7 +109,7 @@ class CallbackOptionOrderingPhaseOneTests(unittest.TestCase):
         show_ctx = _group_context(command, ["--config-show"])
 
         self.assertIsNone(config_ctx.params["csv_path"])
-        self.assertTrue(config_ctx.params["config"])
+        self.assertEqual(config_ctx.params["config"], "default")
         self.assertEqual(config_ctx.args, [])
 
         self.assertIsNone(show_ctx.params["csv_path"])
