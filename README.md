@@ -625,6 +625,17 @@ Foreground is the default so the terminal shows the session. A line is printed o
 07:51:02  sleeping / hold released (Amphetamine session ended)
 ```
 
+If Amphetamine is missing or not ready for a closed lid, coffee says so and names the switch to pmset before it holds sleep:
+
+```text
+07:43:01  Amphetamine is not installed, so coffee cannot use it.
+07:43:01  Setup: install Amphetamine from the Mac App Store (free). `lf coffee setup` opens that page.
+07:43:01  Setup: uncheck Session Defaults → "Allow system sleep when display is closed" once. Amphetamine's scripting API cannot change that checkbox, and coffee will not change it.
+07:43:01  Using pmset instead (`sudo pmset -a disablesleep 1`) until Amphetamine is installed and that checkbox is off.
+07:43:01  `lf coffee --pmset` is the zero-setup path and does not need Amphetamine.
+07:43:01  backend: pmset (Amphetamine is not installed; using pmset instead)
+```
+
 ```sh
 lf coffee
 lf coffee --idle-seconds 90 --poll-seconds 15
@@ -632,6 +643,7 @@ lf coffee --pmset
 lf coffee --allow-battery
 lf coffee --dry-run
 lf coffee --verbose
+lf coffee setup
 lf coffee status
 lf coffee stop
 ```
@@ -640,8 +652,10 @@ Lid state comes from IORegistry `AppleClamshellState` (`Yes` means closed). That
 
 **Backends**
 
-- Amphetamine, when `/Applications/Amphetamine.app` is installed. coffee starts a session with display sleep allowed (the screen may go black). Amphetamine's scripting API cannot toggle closed-display mode; uncheck **Allow system sleep when display is closed** once under Session Defaults or the lid can still sleep the Mac. `--pmset` skips Amphetamine.
-- Otherwise `sudo pmset -a disablesleep 1`. sudo may prompt once. The previous value is restored on normal exit, Ctrl+C / SIGTERM, and if the coffee process dies (a detached helper plus a lock file under `~/.config/lf-toolbox/coffee/`). If both the daemon and the helper are killed, the next `lf coffee`, `lf coffee status`, or `lf coffee stop` clears a leftover `disablesleep`. `caffeinate` is not used; it does not keep the Mac awake with the lid closed.
+- `--pmset` is zero-setup. It does not need Amphetamine. coffee runs `sudo pmset -a disablesleep 1` and says that this path was requested.
+- Amphetamine, when `/Applications/Amphetamine.app` (or `~/Applications/Amphetamine.app`) is installed **and** Session Defaults are saved with **Allow system sleep when display is closed** unchecked. coffee reads that preference (`Allow Closed-Display Sleep` = false) and never writes it. The session allows display sleep (the screen may go black). Amphetamine's scripting API cannot toggle the checkbox.
+- Otherwise coffee prints those setup steps and uses `sudo pmset -a disablesleep 1`. The log says Amphetamine was not ready and that pmset is the backend for this run. `lf coffee status` repeats that. The first foreground start also opens the App Store page, or Amphetamine if it is installed but the checkbox is still on. Later starts keep printing the steps and do not open the page again. `lf coffee setup` opens it on demand (`mas open` when the `mas` CLI is installed, otherwise the public App Store URL; the app itself when it is already installed).
+- sudo may prompt once for pmset. The previous value is restored on normal exit, Ctrl+C / SIGTERM, and if the coffee process dies (a detached helper plus a lock file under `~/.config/lf-toolbox/coffee/`). If both the daemon and the helper are killed, the next `lf coffee`, `lf coffee status`, or `lf coffee stop` clears a leftover `disablesleep`. `caffeinate` is not used; it does not keep the Mac awake with the lid closed.
 
 AC power is required unless `--allow-battery` is set. On battery, coffee reports the agent but does not hold sleep.
 

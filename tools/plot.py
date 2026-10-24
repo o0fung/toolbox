@@ -16,6 +16,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import click
 import typer
 from rich import print
+from typer._click.parser import _OptionParser
 from typer.core import TyperOption
 
 try:
@@ -50,24 +51,49 @@ _CONFIG_OPTION_KEYS = {
 _DEFAULT_PLOT_CONFIG_PROFILE = "default"
 _DEFAULT_PLOT_CONFIG_PATH = os.path.expanduser("~/.config/lf-toolbox/plot.defaults.json")
 _s_plot_typer_option_init = TyperOption.__init__
+_s_plot_get_value_from_state = _OptionParser._get_value_from_state
 
 
 def _plot_typer_option_init(self, *args, **kwargs):
-    # Typer 0.16 still accepts flag_value= on Option() but does not forward it
-    # to Click. Click needs flag_value + _flag_needs_value so plot `--config`
-    # can be used two ways:
+    # Typer accepts flag_value= on Option() but does not forward it, and its
+    # parser does not implement Click 8.5's optional-value flag (bare flag ->
+    # flag_value, next non-option token -> that token). Mark plot's string
+    # `--config` so `_plot_get_value_from_state` can restore both forms:
     # 1) `--config` / trailing `--config` -> profile "default"
     # 2) `--config imu` -> named profile
     # Skip boolean `--config` flags (e.g. note) so they keep true/false parsing.
-    # Without this, Click treats plot `--config` as a required string and
-    # `lf plot --config` fails instead of opening the config file.
     _s_plot_typer_option_init(self, *args, **kwargs)
     if "--config" in self.opts and not self.is_bool_flag:
         self.flag_value = _DEFAULT_PLOT_CONFIG_PROFILE
         self._flag_needs_value = True
 
 
+def _plot_get_value_from_state(self, option_name, option, state):
+    # Optional-value decision for the marked plot `--config` option only.
+    # Typer's parser always raises when a store option has no argument, which
+    # rejects `lf plot --config`. Click 8.5 would emit FLAG_NEEDS_VALUE and
+    # later substitute flag_value; this parser never does that, so apply the
+    # same choice here and store the profile string directly:
+    # 1) no token left, or the next token is another option -> flag value
+    #    ("default"), leaving that option for the rest of the parse
+    # 2) otherwise consume the next token as the profile or path
+    needs_optional_value = getattr(option.obj, "_flag_needs_value", False)
+    if needs_optional_value and option.nargs == 1:
+        if not state.rargs:
+            return option.obj.flag_value
+        next_token = state.rargs[0]
+        if (
+            isinstance(next_token, str)
+            and next_token[:1] in self._opt_prefixes
+            and len(next_token) > 1
+        ):
+            return option.obj.flag_value
+        return state.rargs.pop(0)
+    return _s_plot_get_value_from_state(self, option_name, option, state)
+
+
 TyperOption.__init__ = _plot_typer_option_init  # type: ignore[method-assign]
+_OptionParser._get_value_from_state = _plot_get_value_from_state  # type: ignore[method-assign]
 
 
 def _default_plot_profile_payload() -> Dict[str, object]:

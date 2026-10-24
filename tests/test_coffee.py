@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import plistlib
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -27,6 +29,12 @@ else:
 
 
 HOME = "/Users/lf"
+# Rich help styles each piece of a flag (`--idle-seconds`) in its own span on CI.
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _plain(text: str) -> str:
+    return _ANSI_ESCAPE.sub("", text or "")
 
 
 def _agent(key: str = "abc", name: str = "Fix cache", workspace: str = "/Users/lf/src/api") -> "coffee_activity.BusyAgent":
@@ -493,6 +501,48 @@ class HoldAndStatusTests(unittest.TestCase):
         self.assertFalse(controller.held)
         self.assertEqual(coffee.release_line(""), "sleeping / hold released")
 
+    def test_amphetamine_session_failure_announces_the_pmset_switch(self) -> None:
+        class AmpFail:
+            name = "amphetamine"
+
+            def acquire(self) -> str:
+                raise coffee_awake.CommandError(["osascript"], 1, "app not running")
+
+        class PmsetOK:
+            name = "pmset"
+
+            def acquire(self) -> str:
+                return "sudo pmset -a disablesleep 1"
+
+        controller = coffee.HoldController(
+            AmpFail(),
+            backend_reason="Amphetamine was selected",
+            amphetamine_state="ready",
+        )
+        lines: list[str] = []
+        with (
+            patch("tools.coffee.emit", side_effect=lambda text, now=None: lines.append(text)),
+            patch("tools.coffee.awake.PmsetBackend", return_value=PmsetOK()),
+        ):
+            coffee._apply_steps(
+                [coffee_activity.StatusStep("acquire", "")],
+                controller,
+                Path("/tmp"),
+                on_acquire_failure=lambda: None,
+            )
+        text = "\n".join(lines)
+        self.assertIn("not usable", text)
+        self.assertIn("Allow system sleep when display is closed", text)
+        self.assertIn("Using pmset instead", text)
+        self.assertIn("hold acquired (sudo pmset -a disablesleep 1)", text)
+        self.assertLess(
+            text.index("Using pmset instead"),
+            text.index("hold acquired"),
+        )
+        self.assertEqual(controller.amphetamine_state, "not-usable")
+        self.assertIn("using pmset instead", controller.backend_reason)
+        self.assertTrue(controller.held)
+
 
 @unittest.skipIf(coffee_awake is None, f"Missing dependency: {_IMPORT_ERROR}")
 class AwakeBackendTests(unittest.TestCase):
@@ -522,13 +572,68 @@ class AwakeBackendTests(unittest.TestCase):
         self.assertEqual(state.position, "closed")
         self.assertIn("best-effort", state.detail)
 
+    def _ready(self, **kwargs: object) -> "coffee_awake.AmphetamineReadiness":
+        fields = {
+            "force_pmset": False,
+            "installed": True,
+            "usable": True,
+            "closed_display_sleep_allowed": False,
+        }
+        fields.update(kwargs)
+        return coffee_awake.assess_amphetamine(**fields)  # type: ignore[arg-type]
+
     def test_backend_choice_and_amphetamine_script(self) -> None:
+        ready = self._ready()
+        self.assertEqual(ready.state, "ready")
         self.assertEqual(
-            coffee_awake.choose_backend(force_pmset=False, amphetamine_present=True),
-            ("amphetamine", "Amphetamine is installed"),
+            coffee_awake.choose_backend(ready),
+            (
+                "amphetamine",
+                "Amphetamine is installed and Session Defaults disallow sleep when the display is closed",
+            ),
         )
-        self.assertEqual(coffee_awake.choose_backend(force_pmset=True, amphetamine_present=True)[0], "pmset")
-        self.assertEqual(coffee_awake.choose_backend(force_pmset=False, amphetamine_present=False)[0], "pmset")
+        skipped = self._ready(force_pmset=True, installed=False, usable=False, closed_display_sleep_allowed=None)
+        self.assertEqual(skipped.state, "skipped")
+        self.assertEqual(coffee_awake.choose_backend(skipped)[0], "pmset")
+        self.assertIn("--pmset", skipped.reason)
+        self.assertEqual(coffee_awake.amphetamine_fallback_lines(skipped, dry_run=False), ())
+
+        missing = self._ready(installed=False, usable=False, closed_display_sleep_allowed=None)
+        self.assertEqual(missing.state, "missing")
+        self.assertEqual(coffee_awake.choose_backend(missing)[0], "pmset")
+        self.assertIn("using pmset instead", missing.reason)
+        missing_lines = coffee_awake.amphetamine_fallback_lines(missing, dry_run=False)
+        self.assertTrue(any("not installed" in line for line in missing_lines))
+        self.assertTrue(any("App Store" in line for line in missing_lines))
+        self.assertTrue(any("Allow system sleep when display is closed" in line for line in missing_lines))
+        self.assertTrue(any(line.startswith("Using pmset instead") for line in missing_lines))
+        self.assertTrue(any("--pmset" in line for line in missing_lines))
+        dry_lines = coffee_awake.amphetamine_fallback_lines(missing, dry_run=True)
+        self.assertTrue(any(line.startswith("Would use pmset instead") for line in dry_lines))
+        self.assertFalse(any(line.startswith("Using pmset instead") for line in dry_lines))
+
+        unchecked_unknown = self._ready(closed_display_sleep_allowed=None)
+        self.assertEqual(unchecked_unknown.state, "not-configured")
+        self.assertIn("using pmset instead", unchecked_unknown.reason)
+        still_allowed = self._ready(closed_display_sleep_allowed=True)
+        self.assertEqual(still_allowed.state, "not-configured")
+        configured_lines = coffee_awake.amphetamine_fallback_lines(still_allowed, dry_run=False)
+        self.assertTrue(any("not configured for a closed lid" in line for line in configured_lines))
+        self.assertTrue(any("will not write it" in line for line in configured_lines))
+        self.assertFalse(any("not installed" in line for line in configured_lines))
+
+        broken = self._ready(usable=False)
+        self.assertEqual(broken.state, "not-usable")
+        self.assertEqual(coffee_awake.choose_backend(broken)[0], "pmset")
+        self.assertTrue(
+            any("not usable" in line for line in coffee_awake.amphetamine_fallback_lines(broken, dry_run=False))
+        )
+        self.assertEqual(coffee_awake.amphetamine_fallback_lines(ready, dry_run=False), ())
+
+        failed = coffee_awake.session_failed_readiness()
+        self.assertEqual(failed.state, "not-usable")
+        self.assertIn("using pmset instead", failed.reason)
+
         script = coffee_awake.start_session_script()
         self.assertIn("displaySleepAllowed:true", script)
         self.assertIn("interval:hours", script)
@@ -543,6 +648,106 @@ class AwakeBackendTests(unittest.TestCase):
             app.mkdir()
             self.assertTrue(coffee_awake.amphetamine_installed([app]))
             self.assertFalse(coffee_awake.amphetamine_installed([root / "missing.app"]))
+            self.assertFalse(coffee_awake.amphetamine_bundle_usable([app]))
+            executable = app / "Contents" / "MacOS" / "Amphetamine"
+            executable.parent.mkdir(parents=True)
+            executable.write_text("", encoding="utf-8")
+            self.assertTrue(coffee_awake.amphetamine_bundle_usable([app]))
+
+        source = Path(coffee_awake.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("defaults write", source)
+        self.assertNotIn("plistlib.dump", source)
+
+    def test_closed_display_preference_is_read_and_container_wins(self) -> None:
+        key = coffee_awake.AMPHETAMINE_CLOSED_DISPLAY_SLEEP_KEY
+        self.assertIsNone(coffee_awake.parse_closed_display_sleep_allowed(None))
+        self.assertIsNone(coffee_awake.parse_closed_display_sleep_allowed({}))
+        self.assertIsNone(coffee_awake.parse_closed_display_sleep_allowed({"Other": True}))
+        self.assertIs(coffee_awake.parse_closed_display_sleep_allowed({key: False}), False)
+        self.assertIs(coffee_awake.parse_closed_display_sleep_allowed({key: True}), True)
+        self.assertIs(coffee_awake.parse_closed_display_sleep_allowed({key: 0}), False)
+        self.assertIs(coffee_awake.parse_closed_display_sleep_allowed({key: 1}), True)
+        self.assertIsNone(coffee_awake.parse_closed_display_sleep_allowed({key: "maybe"}))
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            container = root / "container.plist"
+            user_domain = root / "user.plist"
+            container.write_bytes(plistlib.dumps({key: True}))
+            user_domain.write_bytes(plistlib.dumps({key: False}))
+            self.assertIs(
+                coffee_awake.read_closed_display_sleep_allowed([container, user_domain]),
+                True,
+            )
+            self.assertIs(
+                coffee_awake.read_closed_display_sleep_allowed([root / "missing.plist", user_domain]),
+                False,
+            )
+            self.assertIsNone(coffee_awake.read_closed_display_sleep_allowed([root / "missing.plist"]))
+
+    def test_setup_plan_uses_mas_or_the_public_url_or_the_app(self) -> None:
+        missing_mas = coffee_awake.plan_amphetamine_setup(installed=False, mas_on_path=True)
+        self.assertEqual(missing_mas.kind, "mas")
+        self.assertEqual(
+            missing_mas.argv,
+            ("mas", "open", coffee_awake.AMPHETAMINE_APP_STORE_ID),
+        )
+        self.assertNotIn("\n", missing_mas.message)
+        self.assertNotIn("defaults", missing_mas.argv)
+
+        missing_url = coffee_awake.plan_amphetamine_setup(installed=False, mas_on_path=False)
+        self.assertEqual(missing_url.kind, "url")
+        self.assertEqual(missing_url.argv[0], "open")
+        self.assertTrue(missing_url.argv[1].startswith("https://apps.apple.com/"))
+        self.assertIn(coffee_awake.AMPHETAMINE_APP_STORE_ID, missing_url.argv[1])
+
+        present = coffee_awake.plan_amphetamine_setup(
+            installed=True,
+            mas_on_path=True,
+            closed_display_sleep_allowed=True,
+        )
+        self.assertEqual(present.kind, "app")
+        self.assertEqual(present.argv, ("open", "-a", "Amphetamine"))
+        self.assertIn("Allow system sleep when display is closed", present.message)
+        self.assertIn("cannot change that checkbox", present.message)
+
+        unknown = coffee_awake.plan_amphetamine_setup(installed=True, mas_on_path=False)
+        self.assertEqual(unknown.message, coffee_awake.AMPHETAMINE_SESSION_DEFAULTS_NOTE)
+
+        already = coffee_awake.plan_amphetamine_setup(
+            installed=True,
+            mas_on_path=True,
+            closed_display_sleep_allowed=False,
+        )
+        self.assertEqual(already.kind, "app")
+        self.assertIn("did not change that checkbox", already.message)
+        self.assertNotIn("Uncheck", already.message)
+
+        calls: list[list[str]] = []
+
+        def run(argv, interactive=False, timeout=30):
+            del interactive, timeout
+            calls.append(list(argv))
+            if argv and argv[0] == "mas":
+                raise coffee_awake.CommandError(argv, 1, "not signed in")
+            return coffee_awake.CommandResult(0, "", "")
+
+        used = coffee_awake.run_setup_plan(missing_mas, run=run)
+        self.assertEqual(used.kind, "url")
+        self.assertEqual(calls[0], ["mas", "open", coffee_awake.AMPHETAMINE_APP_STORE_ID])
+        self.assertEqual(calls[1], ["open", coffee_awake.AMPHETAMINE_APP_STORE_URL])
+
+        calls.clear()
+        opened = coffee_awake.run_setup_plan(present, run=run)
+        self.assertEqual(opened.kind, "app")
+        self.assertEqual(calls, [["open", "-a", "Amphetamine"]])
+
+        def fail(argv, interactive=False, timeout=30):
+            del interactive, timeout
+            raise coffee_awake.CommandError(argv, 1, "no browser")
+
+        with self.assertRaises(coffee_awake.CommandError):
+            coffee_awake.run_setup_plan(missing_url, run=fail)
 
     def _runner(self, value: dict[str, str]):
         calls: list[list[str]] = []
@@ -669,12 +874,19 @@ class CoffeeCliTests(unittest.TestCase):
         self.assertTrue(command.invoke_without_command)
 
     def test_help_lists_the_subcommand_and_flags(self) -> None:
-        result = CliRunner().invoke(coffee.app, ["--help"])
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("status", result.output)
-        self.assertIn("stop", result.output)
+        result = CliRunner().invoke(
+            coffee.app,
+            ["--help"],
+            color=False,
+            env={"NO_COLOR": "1", "TERM": "dumb"},
+        )
+        text = _plain((result.output or "") + (result.stderr or ""))
+        self.assertEqual(result.exit_code, 0, text)
+        self.assertIn("status", text)
+        self.assertIn("stop", text)
+        self.assertIn("setup", text)
         for flag in ("--idle-seconds", "--poll-seconds", "--pmset", "--allow-battery", "--dry-run", "--verbose"):
-            self.assertIn(flag, result.output)
+            self.assertIn(flag, text)
 
     def test_non_macos_refuses_without_changing_sleep(self) -> None:
         result = CliRunner().invoke(coffee.app, [])
@@ -683,6 +895,209 @@ class CoffeeCliTests(unittest.TestCase):
         self.assertIn("macOS", text)
         self.assertIn("Amphetamine", text)
         self.assertIn("pmset", text)
+
+    def test_status_names_the_pmset_fallback_when_amphetamine_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            with (
+                patch.object(coffee.sys, "platform", "darwin"),
+                patch.object(coffee, "coffee_state_dir", return_value=state),
+                patch.object(coffee.awake, "amphetamine_installed", return_value=False),
+                patch.object(coffee.awake, "amphetamine_bundle_usable", return_value=False),
+                patch.object(coffee.awake, "read_closed_display_sleep_allowed", return_value=None),
+            ):
+                result = CliRunner().invoke(coffee.app, ["status"])
+        text = (result.output or "") + (result.stderr or "")
+        self.assertEqual(result.exit_code, 0, text)
+        self.assertIn("amphetamine: missing", text)
+        self.assertIn("default backend: pmset", text)
+        self.assertIn("not installed", text)
+        self.assertIn("Using pmset instead", text)
+        self.assertIn("Allow system sleep when display is closed", text)
+        self.assertIn("App Store", text)
+        self.assertIn("running: no", text)
+
+    def test_status_says_amphetamine_is_ready_only_when_the_checkbox_is_off(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            with (
+                patch.object(coffee.sys, "platform", "darwin"),
+                patch.object(coffee, "coffee_state_dir", return_value=state),
+                patch.object(coffee.awake, "amphetamine_installed", return_value=True),
+                patch.object(coffee.awake, "amphetamine_bundle_usable", return_value=True),
+                patch.object(coffee.awake, "read_closed_display_sleep_allowed", return_value=False),
+            ):
+                result = CliRunner().invoke(coffee.app, ["status"])
+        text = (result.output or "") + (result.stderr or "")
+        self.assertEqual(result.exit_code, 0, text)
+        self.assertIn("amphetamine: ready", text)
+        self.assertIn("default backend: amphetamine", text)
+        self.assertNotIn("Using pmset instead", text)
+        self.assertIn("does not change that checkbox", text)
+
+    def test_setup_opens_mas_when_amphetamine_is_missing(self) -> None:
+        calls: list[list[str]] = []
+
+        def run(argv, interactive=False, timeout=30):
+            del interactive, timeout
+            calls.append(list(argv))
+            return coffee_awake.CommandResult(0, "", "")
+
+        with (
+            patch.object(coffee.sys, "platform", "darwin"),
+            patch.object(coffee.awake, "amphetamine_installed", return_value=False),
+            patch.object(coffee.awake, "amphetamine_bundle_usable", return_value=False),
+            patch.object(coffee.shutil, "which", return_value="/usr/local/bin/mas"),
+            patch.object(coffee.awake, "default_run", run),
+        ):
+            result = CliRunner().invoke(coffee.app, ["setup"])
+        text = (result.output or "") + (result.stderr or "")
+        self.assertEqual(result.exit_code, 0, text)
+        self.assertEqual(calls, [["mas", "open", coffee_awake.AMPHETAMINE_APP_STORE_ID]])
+        self.assertIn("Using pmset instead", text)
+        self.assertIn("Mac App Store", text)
+
+    def test_setup_opens_the_public_url_without_mas(self) -> None:
+        calls: list[list[str]] = []
+
+        def run(argv, interactive=False, timeout=30):
+            del interactive, timeout
+            calls.append(list(argv))
+            return coffee_awake.CommandResult(0, "", "")
+
+        with (
+            patch.object(coffee.sys, "platform", "darwin"),
+            patch.object(coffee.awake, "amphetamine_installed", return_value=False),
+            patch.object(coffee.awake, "amphetamine_bundle_usable", return_value=False),
+            patch.object(coffee.shutil, "which", return_value=None),
+            patch.object(coffee.awake, "default_run", run),
+        ):
+            result = CliRunner().invoke(coffee.app, ["setup"])
+        text = (result.output or "") + (result.stderr or "")
+        self.assertEqual(result.exit_code, 0, text)
+        self.assertEqual(calls, [["open", coffee_awake.AMPHETAMINE_APP_STORE_URL]])
+        self.assertIn("App Store page", text)
+
+    def test_setup_opens_the_app_and_prints_the_checkbox_line(self) -> None:
+        calls: list[list[str]] = []
+
+        def run(argv, interactive=False, timeout=30):
+            del interactive, timeout
+            calls.append(list(argv))
+            return coffee_awake.CommandResult(0, "", "")
+
+        with (
+            patch.object(coffee.sys, "platform", "darwin"),
+            patch.object(coffee.awake, "amphetamine_installed", return_value=True),
+            patch.object(coffee.awake, "amphetamine_bundle_usable", return_value=True),
+            patch.object(coffee.awake, "read_closed_display_sleep_allowed", return_value=True),
+            patch.object(coffee.shutil, "which", return_value="/usr/local/bin/mas"),
+            patch.object(coffee.awake, "default_run", run),
+        ):
+            result = CliRunner().invoke(coffee.app, ["setup"])
+        text = (result.output or "") + (result.stderr or "")
+        self.assertEqual(result.exit_code, 0, text)
+        self.assertEqual(calls, [["open", "-a", "Amphetamine"]])
+        self.assertIn(coffee_awake.AMPHETAMINE_SESSION_DEFAULTS_NOTE, text)
+        self.assertIn("Using pmset instead", text)
+        self.assertNotIn("mas open", " ".join(" ".join(argv) for argv in calls))
+
+    def test_first_run_helper_opens_once_and_stays_quiet_for_dry_run(self) -> None:
+        calls: list[list[str]] = []
+
+        def run(argv, interactive=False, timeout=30):
+            del interactive, timeout
+            calls.append(list(argv))
+            return coffee_awake.CommandResult(0, "", "")
+
+        missing = coffee_awake.assess_amphetamine(
+            force_pmset=False,
+            installed=False,
+            usable=False,
+            closed_display_sleep_allowed=None,
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            note = coffee._maybe_open_setup_helper(
+                readiness=missing,
+                state_dir=state,
+                dry_run=False,
+                interactive=True,
+                mas_on_path=True,
+                run=run,
+            )
+            self.assertIsNotNone(note)
+            assert note is not None
+            self.assertIn("mas", note)
+            self.assertEqual(calls, [["mas", "open", coffee_awake.AMPHETAMINE_APP_STORE_ID]])
+            self.assertTrue((state / "setup-opened-missing").is_file())
+            self.assertIsNone(
+                coffee._maybe_open_setup_helper(
+                    readiness=missing,
+                    state_dir=state,
+                    dry_run=False,
+                    interactive=True,
+                    mas_on_path=True,
+                    run=run,
+                )
+            )
+            self.assertEqual(len(calls), 1)
+
+            unconfigured = coffee_awake.assess_amphetamine(
+                force_pmset=False,
+                installed=True,
+                usable=True,
+                closed_display_sleep_allowed=None,
+            )
+            opened = coffee._maybe_open_setup_helper(
+                readiness=unconfigured,
+                state_dir=state,
+                dry_run=False,
+                interactive=True,
+                mas_on_path=True,
+                run=run,
+            )
+            self.assertEqual(calls[-1], ["open", "-a", "Amphetamine"])
+            self.assertIn("Allow system sleep when display is closed", opened or "")
+            self.assertIsNone(
+                coffee._maybe_open_setup_helper(
+                    readiness=missing,
+                    state_dir=state,
+                    dry_run=True,
+                    interactive=True,
+                    mas_on_path=False,
+                    run=run,
+                )
+            )
+            self.assertIsNone(
+                coffee._maybe_open_setup_helper(
+                    readiness=missing,
+                    state_dir=state / "quiet",
+                    dry_run=False,
+                    interactive=False,
+                    mas_on_path=False,
+                    run=run,
+                )
+            )
+            self.assertEqual(len(calls), 2)
+            self.assertFalse((state / "quiet" / "setup-opened-missing").exists())
+
+        def fail(argv, interactive=False, timeout=30):
+            del argv, interactive, timeout
+            raise coffee_awake.CommandError(["open"], 1, "no display")
+
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            with self.assertRaises(coffee_awake.CommandError):
+                coffee._maybe_open_setup_helper(
+                    readiness=missing,
+                    state_dir=state,
+                    dry_run=False,
+                    interactive=True,
+                    mas_on_path=False,
+                    run=fail,
+                )
+            self.assertFalse((state / "setup-opened-missing").exists())
 
 
 if __name__ == "__main__":
