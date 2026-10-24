@@ -24,12 +24,12 @@ from __future__ import annotations
 
 import json
 import os
+import plistlib
 import re
 import signal
 import subprocess
 import sys
 import time
-import plistlib
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -242,9 +242,8 @@ def amphetamine_preference_paths() -> tuple[Path, ...]:
     """Plists Amphetamine may have saved, container first.
 
     The App Store build is sandboxed, so the container file is the one the app
-    reads. ``defaults write`` from a shell lands in the user-domain file and is
-    only consulted when the container file is not there. coffee never writes
-    either file.
+    reads. The user-domain plist is only consulted when that container file is
+    absent. coffee never writes either file.
     """
     home = Path.home()
     container = (
