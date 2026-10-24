@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -301,6 +302,31 @@ class PlotToolTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertTrue(os.path.isfile(plot._DEFAULT_PLOT_CONFIG_PATH))
         self.assertEqual(opened_paths, [plot._DEFAULT_PLOT_CONFIG_PATH])
+
+    def test_explicit_scale_overrides_config_profile(self) -> None:
+        # The callback prints the applied scale, then imports PyQt6. Blocking
+        # that import exits before a window opens and leaves the scale line
+        # in the captured output, so a saved 0.02 cannot hide behind the GUI.
+        config_path = plot._DEFAULT_PLOT_CONFIG_PATH
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
+        with open(config_path, "w", encoding="utf-8") as handle:
+            json.dump({"default": {"scale": 0.02}}, handle)
+
+        csv_path = os.path.join(self._temp_dir.name, "series.csv")
+        with open(csv_path, "w", encoding="utf-8") as handle:
+            handle.write("t,v\n1,2\n2,3\n3,4\n")
+
+        runner = CliRunner()
+        with patch.dict(sys.modules, {"PyQt6": None}):
+            result = runner.invoke(
+                plot.app,
+                [csv_path, "--config", "default", "--scale", "1"],
+            )
+
+        output = _ANSI_ESCAPE.sub("", result.output)
+        self.assertIn("Loaded", output)
+        self.assertIn("PyQt6/pyqtgraph not available", output)
+        self.assertNotIn("x_raw * 0.02", output)
 
     def test_plot_without_csv_and_without_config_fails(self) -> None:
         runner = CliRunner()

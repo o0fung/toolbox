@@ -13,9 +13,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Tuple
 
-import click
 import typer
 from rich import print
+from typer._click.core import ParameterSource
+from typer._click.globals import get_current_context
 from typer._click.parser import _OptionParser
 from typer.core import TyperOption
 
@@ -717,12 +718,15 @@ def plot(
 
     if config_enabled:
         _ensure_plot_config_file(_DEFAULT_PLOT_CONFIG_PATH)
-        click_ctx = click.get_current_context(silent=True)
+        # Typer 0.26+ runs on its bundled Click. The standalone click package
+        # has a different context stack, so a saved profile would ignore flags
+        # typed on the command line if we asked it which options were explicit.
+        click_ctx = get_current_context(silent=True)
         explicit_keys: set[str] = set()
         if click_ctx is not None:
             for name in option_names:
                 source = click_ctx.get_parameter_source(name)
-                if source == click.core.ParameterSource.COMMANDLINE:
+                if source == ParameterSource.COMMANDLINE:
                     explicit_keys.add(name)
 
         config_values = _load_plot_config_profile(_DEFAULT_PLOT_CONFIG_PATH, config_profile)
