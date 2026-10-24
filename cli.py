@@ -11,6 +11,7 @@ Subcommands:
     - compress: PDF/video compression helpers
     - plot:    CSV plotting with pyqtgraph subplots
     - note:    timestamped Markdown note management
+    - coffee:  keep a Mac awake during local Cursor agent work
 
 Examples:
     python cli.py clock                     # full-screen clock
@@ -23,6 +24,7 @@ Examples:
     python cli.py compress video input.mov  # compress video to MP4
     python cli.py plot data.csv             # CSV plotting
     python cli.py note -n "project ideas"    # create and edit a note
+    python cli.py coffee                     # hold sleep while a local agent works
 """
 
 from __future__ import annotations

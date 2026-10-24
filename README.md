@@ -12,6 +12,7 @@ A set of useful command-line tools for enhancing productivity.
 - **compress**: Compress PDF files with Ghostscript and videos to smaller MP4 files with FFmpeg.
 - **plot**: Plot CSV data with pyqtgraph subplots.
 - **note**: Create, organize, list, and open timestamped Markdown notes.
+- **coffee**: On macOS, keep the Mac awake while a local Cursor agent is working, then let it sleep when that work is idle.
 
 ## Installation
 
@@ -607,6 +608,53 @@ The `browser` setting is an optional command template for `--browse`; `%s` is re
 
 ---
 
+## 🚩 coffee
+
+Keep a Mac awake while a **local** Cursor agent is working, including with the lid closed, then allow sleep when that work is finished. Cloud agents do not hold the machine awake.
+
+Foreground is the default so the terminal shows the session. A line is printed only when the lid, the active agent, or the sleep hold changes (`--verbose` prints every poll).
+
+```text
+07:43:01  lid open (best-effort; AppleClamshellState=No)
+07:44:10  agent busy: Fix cache (id abc, workspace ~/src/api)
+07:44:10  hold acquired (Amphetamine session via osascript, display sleep allowed, 12h)
+07:44:40  lid closed (best-effort; AppleClamshellState=Yes)
+07:44:40  agent busy: Fix cache (id abc, workspace ~/src/api)
+07:51:02  agent finished: Fix cache (id abc, workspace ~/src/api)
+07:51:02  all local agents idle; releasing sleep hold
+07:51:02  sleeping / hold released (Amphetamine session ended)
+```
+
+```sh
+lf coffee
+lf coffee --idle-seconds 90 --poll-seconds 15
+lf coffee --pmset
+lf coffee --allow-battery
+lf coffee --dry-run
+lf coffee --verbose
+lf coffee status
+lf coffee stop
+```
+
+Lid state comes from IORegistry `AppleClamshellState` (`Yes` means closed). That sensor is best-effort: desktops and some VMs do not expose it, and the line says so.
+
+**Backends**
+
+- Amphetamine, when `/Applications/Amphetamine.app` is installed. coffee starts a session with display sleep allowed (the screen may go black). Amphetamine's scripting API cannot toggle closed-display mode; uncheck **Allow system sleep when display is closed** once under Session Defaults or the lid can still sleep the Mac. `--pmset` skips Amphetamine.
+- Otherwise `sudo pmset -a disablesleep 1`. sudo may prompt once. The previous value is restored on normal exit, Ctrl+C / SIGTERM, and if the coffee process dies (a detached helper plus a lock file under `~/.config/lf-toolbox/coffee/`). If both the daemon and the helper are killed, the next `lf coffee`, `lf coffee status`, or `lf coffee stop` clears a leftover `disablesleep`. `caffeinate` is not used; it does not keep the Mac awake with the lid closed.
+
+AC power is required unless `--allow-battery` is set. On battery, coffee reports the agent but does not hold sleep.
+
+**Detection** is heuristic. There is no Cursor API for "the agent is generating". coffee watches:
+
+- `~/.cursor/projects/<project>/agent-transcripts/**/*.jsonl` (local IDE and cursor-agent transcripts, including subagents)
+- `~/.cursor/chats/<hash>/<id>/store.db` (local cursor-agent store)
+- `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` composer headers and `composerData:<id>` (`status` such as `generating`)
+
+A fresh transcript counts as busy. Plan approval, `CreatePlan`, `AskQuestion`, and phrases such as "waiting for you to execute" release the hold immediately. Otherwise the hold drops after `--idle-seconds` (default 120) without local agent output. Composer rows tagged as background/cloud agents are ignored. A `generating` status that never updates again is ignored after 30 minutes. Tune `--idle-seconds` if a long silent tool call releases the hold early.
+
+---
+
 ## Project Structure
 
 ```
@@ -622,11 +670,15 @@ tools/
 	compress.py   # PDF/video compression helpers
 	plot.py       # CSV plotting with pyqtgraph (PyQt6)
 	note.py       # Timestamped Markdown note manager
+	coffee.py     # macOS awake hold while a local Cursor agent works
+	coffee_activity.py # Local-agent activity heuristic
+	coffee_awake.py    # Amphetamine / pmset hold and restore
 tests/
 	test_cheque.py
 	test_note.py
 	test_compress.py
 	test_tree.py
+	test_coffee.py
 ```
 
 ## License
