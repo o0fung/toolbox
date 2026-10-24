@@ -1,3 +1,7 @@
+# `lf-toolbox` v1.16.0
+
+- Added `lf coffee` for macOS. It holds sleep while a local Cursor agent is working (Amphetamine, or `pmset disablesleep` with restore on exit and process death) and releases the hold when local agents are idle, including a plan-mode pause. Cloud agents are ignored. The foreground process prints lid, active-agent, and hold changes.
+
 # `lf-toolbox` v1.10.3
 
 This release rounds out `lf-toolbox` into a complete multi-tool CLI and adds the GitHub Release -> PyPI publishing flow for simpler shipping and upgrades.
