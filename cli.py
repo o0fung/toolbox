@@ -25,6 +25,7 @@ Examples:
     python cli.py plot data.csv             # CSV plotting
     python cli.py note -n "project ideas"    # create and edit a note
     python cli.py coffee                     # hold sleep while a local agent works
+    python cli.py coffee setup               # open Amphetamine's install page or app
 """
 
 from __future__ import annotations

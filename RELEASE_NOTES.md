@@ -1,6 +1,7 @@
 # `lf-toolbox` v1.16.0
 
 - Added `lf coffee` for macOS. It holds sleep while a local Cursor agent is working (Amphetamine, or `pmset disablesleep` with restore on exit and process death) and releases the hold when local agents are idle, including a plan-mode pause. Cloud agents are ignored. The foreground process prints lid, active-agent, and hold changes.
+- `lf coffee` prints Amphetamine setup steps and switches to `pmset` in the log when Amphetamine is missing, not usable, or not configured for a closed lid (Session Defaults → "Allow system sleep when display is closed"). `--pmset` stays the zero-setup path. `lf coffee setup` opens the App Store page (`mas` if installed, otherwise the public URL) or Amphetamine itself, and does not change that checkbox.
 
 # `lf-toolbox` v1.10.3
 

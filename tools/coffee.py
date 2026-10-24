@@ -5,8 +5,12 @@ during local IDE or cursor-agent work. Cloud agents are ignored. The hold
 is released when every local agent is idle, including a plan-mode pause,
 and again on exit.
 
-Amphetamine is preferred. ``--pmset`` (or a missing Amphetamine.app) uses
-``sudo pmset -a disablesleep 1`` and restores the previous value on exit,
+Amphetamine is preferred when it is installed and Session Defaults already
+disallow system sleep with the display closed. coffee cannot change that
+checkbox. If Amphetamine is missing, not usable, or not configured for a
+closed lid, coffee prints the setup steps and uses ``sudo pmset -a
+disablesleep 1`` instead, and says so in the log. ``--pmset`` selects that
+path up front. The previous ``disablesleep`` value is restored on exit,
 on SIGINT/SIGTERM, and if this process dies.
 
 The foreground process prints a short line when the lid, the active agent,
@@ -19,6 +23,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -90,9 +95,19 @@ class DryRunBackend:
 class HoldController:
     """Remember whether this process currently believes the hold is on."""
 
-    def __init__(self, backend: Any):
+    def __init__(
+        self,
+        backend: Any,
+        *,
+        backend_reason: str = "",
+        amphetamine_state: str = "",
+    ):
         self.backend = backend
         self.held = False
+        # Logged on every status read so a pmset fallback is not only in the
+        # startup scrollback.
+        self.backend_reason = backend_reason
+        self.amphetamine_state = amphetamine_state
 
     def acquire(self) -> str:
         note = self.backend.acquire()
@@ -250,6 +265,8 @@ def _state_payload(
         ],
         "updated_at": time.time(),
         "dry_run": config.dry_run,
+        "backend_reason": controller.backend_reason,
+        "amphetamine": controller.amphetamine_state,
     }
 
 
@@ -270,6 +287,12 @@ def _print_saved_state(state_dir: Path, *, running: bool) -> None:
         return
     prefix = "" if running else "last "
     info(f"{prefix}backend: {state.get('backend', 'unknown')}")
+    backend_reason = state.get("backend_reason")
+    if isinstance(backend_reason, str) and backend_reason:
+        info(f"{prefix}backend detail: {backend_reason}")
+    amphetamine_state = state.get("amphetamine")
+    if isinstance(amphetamine_state, str) and amphetamine_state:
+        info(f"{prefix}amphetamine: {amphetamine_state}")
     info(f"{prefix}hold: {'yes' if state.get('hold') else 'no'}")
     lid = state.get("lid", "unknown")
     detail = state.get("lid_detail") or "best-effort"
@@ -298,9 +321,9 @@ def _emit_banner(config: CoffeeConfig, backend_name: str, why: str) -> None:
         emit("dry-run: detection only; sleep settings will not change")
     elif backend_name == "amphetamine":
         emit(
-            "Amphetamine session allows the display to sleep. "
-            'For a closed lid, uncheck "Allow system sleep when display is closed" '
-            "in Amphetamine Session Defaults (not a start-session option)."
+            "Using Amphetamine. The display may sleep. "
+            "Session Defaults already disallow system sleep when the display is closed. "
+            "coffee did not change that checkbox."
         )
     else:
         emit(
@@ -375,7 +398,15 @@ def _apply_steps(
                 note = controller.acquire()
             except awake.CommandError as exc:
                 if getattr(controller.backend, "name", "") == "amphetamine":
-                    emit("Amphetamine failed; falling back to pmset")
+                    # The session did not start. Say why, print the checkbox
+                    # step, then take the pmset hold in this same poll so the
+                    # switch is in the log before "hold acquired".
+                    failed = awake.session_failed_readiness()
+                    controller.backend_reason = f"{failed.reason} ({exc})"
+                    controller.amphetamine_state = failed.state
+                    for line in awake.amphetamine_fallback_lines(failed, dry_run=False):
+                        emit(line)
+                    emit(controller.backend_reason)
                     controller.backend = awake.PmsetBackend(state_dir)
                     try:
                         note = controller.acquire()
@@ -453,6 +484,66 @@ def _release_for_exit(controller: HoldController) -> None:
     emit(release_line(note))
 
 
+def _current_readiness(*, force_pmset: bool) -> awake.AmphetamineReadiness:
+    """Read the app bundle and the closed-lid preference. Does not write either."""
+    installed = awake.amphetamine_installed()
+    usable = awake.amphetamine_bundle_usable() if installed else False
+    allowed = awake.read_closed_display_sleep_allowed() if installed and usable else None
+    return awake.assess_amphetamine(
+        force_pmset=force_pmset,
+        installed=installed,
+        usable=usable,
+        closed_display_sleep_allowed=allowed,
+    )
+
+
+def _print_live_readiness(readiness: awake.AmphetamineReadiness) -> None:
+    """Print what a plain ``lf coffee`` would do right now."""
+    backend_name, why = awake.choose_backend(readiness)
+    info(f"amphetamine: {readiness.state}")
+    info(f"default backend: {backend_name} ({why})")
+    for line in awake.amphetamine_fallback_lines(readiness, dry_run=False):
+        info(line)
+    if readiness.state == "ready":
+        info(
+            "Session Defaults already disallow system sleep when the display is closed. "
+            "coffee does not change that checkbox. `lf coffee --pmset` skips Amphetamine."
+        )
+
+
+def _maybe_open_setup_helper(
+    *,
+    readiness: awake.AmphetamineReadiness,
+    state_dir: Path,
+    dry_run: bool,
+    interactive: bool,
+    mas_on_path: bool,
+    run: awake.Run | None = None,
+) -> str | None:
+    """Open the App Store page or Amphetamine once for this unreadiness state.
+
+    Instructions are printed on every start even when this returns None.
+    Dry-run and non-interactive sessions never open a window. A failed open
+    leaves the marker unset so the next foreground start can retry.
+    """
+    if dry_run or not interactive or readiness.state not in {"missing", "not-configured", "not-usable"}:
+        return None
+    marker = state_dir / f"setup-opened-{readiness.state}"
+    if marker.exists():
+        return None
+    # Not configured: open the app so Session Defaults is one menu away.
+    # Missing or not usable: open the store page (mas, else the public URL).
+    plan = awake.plan_amphetamine_setup(
+        installed=readiness.state == "not-configured",
+        mas_on_path=mas_on_path,
+        closed_display_sleep_allowed=None,
+    )
+    used = awake.run_setup_plan(plan, run=run)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("opened\n", encoding="utf-8")
+    return used.message
+
+
 def serve(config: CoffeeConfig) -> None:
     """Poll local Cursor activity and hold sleep only while it is busy.
 
@@ -466,24 +557,47 @@ def serve(config: CoffeeConfig) -> None:
     Mac awake. A failed acquire is retried after a few minutes, not every poll.
     """
     require_macos()
+    state_dir = coffee_state_dir()
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    # Say which backend this run will use before detaching. A `--background`
+    # parent still has the terminal; the child repeats the same lines in the log.
+    # Amphetamine is used only when the closed-lid checkbox is already saved off.
+    readiness = _current_readiness(force_pmset=config.force_pmset)
+    for line in awake.amphetamine_fallback_lines(readiness, dry_run=config.dry_run):
+        emit(line)
+    if readiness.state in {"missing", "not-configured", "not-usable"}:
+        try:
+            opened = _maybe_open_setup_helper(
+                readiness=readiness,
+                state_dir=state_dir,
+                dry_run=config.dry_run,
+                interactive=sys.stdin.isatty() and sys.stdout.isatty(),
+                mas_on_path=shutil.which("mas") is not None,
+            )
+        except awake.CommandError as exc:
+            emit(f"could not open the Amphetamine setup helper: {exc}")
+        else:
+            if opened:
+                emit(opened)
+    backend_name, why = awake.choose_backend(readiness)
+    _emit_banner(config, backend_name, why)
+
     if config.background:
         _relaunch_in_background()
         return
 
-    state_dir = coffee_state_dir()
-    state_dir.mkdir(parents=True, exist_ok=True)
     _ensure_single_instance(state_dir)
 
     restored = awake.recover_orphan_lock(state_dir)
     if restored:
         emit(restored)
 
-    backend_name, why = awake.choose_backend(
-        force_pmset=config.force_pmset,
-        amphetamine_present=awake.amphetamine_installed(),
+    controller = HoldController(
+        _build_backend(backend_name, state_dir, dry_run=config.dry_run),
+        backend_reason=why,
+        amphetamine_state=readiness.state,
     )
-    _emit_banner(config, backend_name, why)
-    controller = HoldController(_build_backend(backend_name, state_dir, dry_run=config.dry_run))
 
     def _safety_release() -> None:
         if controller.held:
@@ -585,6 +699,7 @@ def serve(config: CoffeeConfig) -> None:
 
 def _status() -> None:
     require_macos()
+    _print_live_readiness(_current_readiness(force_pmset=False))
     state_dir = coffee_state_dir()
     running = state_dir.exists() and daemon_is_running(state_dir)
     if not running:
@@ -698,9 +813,49 @@ def coffee(
     )
 
 
+@app.command("setup")
+def setup() -> None:
+    """Open the Amphetamine App Store page, or the app, and print the closed-lid step.
+
+    ``--pmset`` does not need this. coffee cannot uncheck Session Defaults;
+    this only opens the page or the app and tells you which box to change.
+    """
+    require_macos()
+    installed = awake.amphetamine_installed()
+    usable = awake.amphetamine_bundle_usable() if installed else False
+    allowed = awake.read_closed_display_sleep_allowed() if installed and usable else None
+    readiness = awake.assess_amphetamine(
+        force_pmset=False,
+        installed=installed,
+        usable=usable,
+        closed_display_sleep_allowed=allowed,
+    )
+    for line in awake.amphetamine_fallback_lines(readiness, dry_run=False):
+        info(line)
+    if readiness.state == "ready":
+        info(
+            "Amphetamine is already set up for a closed lid. "
+            "coffee did not change Session Defaults. "
+            "`lf coffee --pmset` remains the zero-setup path."
+        )
+    # A broken bundle should get the store page, not `open -a` on a dead app.
+    # A saved-off checkbox still opens Amphetamine so the setting can be checked.
+    open_app = readiness.state in {"not-configured", "ready"}
+    plan = awake.plan_amphetamine_setup(
+        installed=open_app,
+        mas_on_path=shutil.which("mas") is not None,
+        closed_display_sleep_allowed=allowed if open_app else None,
+    )
+    try:
+        used = awake.run_setup_plan(plan)
+    except awake.CommandError as exc:
+        fatal(f"could not open the Amphetamine setup helper: {exc}")
+    info(used.message)
+
+
 @app.command("status")
 def status() -> None:
-    """Show whether coffee is running, the backend, the lid, and the last agent state."""
+    """Show Amphetamine readiness, the backend, the lid, and the last agent state."""
     _status()
 
 

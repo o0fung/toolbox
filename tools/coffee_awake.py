@@ -1,15 +1,18 @@
 """macOS sleep holds for ``lf coffee``.
 
-Amphetamine is preferred. A session is started with display sleep allowed so
-the panel can go black. Amphetamine's AppleScript dictionary only accepts
-duration, interval, and ``displaySleepAllowed`` on ``start new session``.
-Staying awake with the lid shut also requires the Session Defaults checkbox
-"Allow system sleep when display is closed" to be unchecked. That checkbox
-is not a start-session parameter.
+Amphetamine is preferred only when it is installed, the app bundle can be
+launched, and Session Defaults are already saved with closed-display sleep
+off. A session is started with display sleep allowed so the panel can go
+black. Amphetamine's AppleScript dictionary only accepts duration, interval,
+and ``displaySleepAllowed`` on ``start new session``. The Session Defaults
+checkbox "Allow system sleep when display is closed" is not a start-session
+parameter. This module reads that preference and never writes it.
 
-``--pmset`` (and the automatic fallback when Amphetamine is missing) runs
-``sudo pmset -a disablesleep 1``. Plain ``caffeinate`` is intentionally not
-used: its assertions are dropped when the lid closes.
+When Amphetamine is missing, not usable, or not configured for a closed lid,
+callers print setup instructions and use ``sudo pmset -a disablesleep 1``.
+``--pmset`` selects that path up front and does not require Amphetamine.
+Plain ``caffeinate`` is intentionally not used: its assertions are dropped
+when the lid closes.
 
 ``disablesleep`` is restored on normal release, and if this process dies, by
 a detached supervisor plus the lock file. The next ``lf coffee`` / ``status``
@@ -26,11 +29,12 @@ import signal
 import subprocess
 import sys
 import time
+import plistlib
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 
 AMPHETAMINE_SESSION_HOURS = 12
@@ -202,6 +206,325 @@ def amphetamine_installed(app_paths: Sequence[Path] | None = None) -> bool:
     return any(path.is_dir() for path in paths)
 
 
+def amphetamine_bundle_usable(app_paths: Sequence[Path] | None = None) -> bool:
+    """True when an Amphetamine.app bundle contains a launchable executable.
+
+    A directory named ``Amphetamine.app`` with no ``Contents/MacOS`` binary is
+    installed but not usable. Callers fall back to pmset instead of scripting it.
+    """
+    paths = tuple(app_paths) if app_paths is not None else amphetamine_app_paths()
+    for path in paths:
+        macos_dir = path / "Contents" / "MacOS"
+        if not macos_dir.is_dir():
+            continue
+        if any(child.is_file() for child in macos_dir.iterdir()):
+            return True
+    return False
+
+
+# App Store id for Amphetamine (William Gustafson). ``mas open`` and the public
+# URL both land on this listing. coffee never installs or purchases the app.
+AMPHETAMINE_APP_STORE_ID = "937984704"
+AMPHETAMINE_APP_STORE_URL = "https://apps.apple.com/app/amphetamine/id937984704"
+# Top-level preference written by Amphetamine when Session Defaults are saved.
+# False means the checkbox "Allow system sleep when display is closed" is off,
+# which is the closed-lid setup. True (or a missing key) is not that setup.
+AMPHETAMINE_CLOSED_DISPLAY_SLEEP_KEY = "Allow Closed-Display Sleep"
+AMPHETAMINE_BUNDLE_ID = "com.if.Amphetamine"
+# One line. Printed when we open Amphetamine. The checkbox stays manual.
+AMPHETAMINE_SESSION_DEFAULTS_NOTE = (
+    'Uncheck Session Defaults → "Allow system sleep when display is closed" once. '
+    "Amphetamine's scripting API cannot change that checkbox."
+)
+
+
+def amphetamine_preference_paths() -> tuple[Path, ...]:
+    """Plists Amphetamine may have saved, container first.
+
+    The App Store build is sandboxed, so the container file is the one the app
+    reads. ``defaults write`` from a shell lands in the user-domain file and is
+    only consulted when the container file is not there. coffee never writes
+    either file.
+    """
+    home = Path.home()
+    container = (
+        home
+        / "Library"
+        / "Containers"
+        / AMPHETAMINE_BUNDLE_ID
+        / "Data"
+        / "Library"
+        / "Preferences"
+        / f"{AMPHETAMINE_BUNDLE_ID}.plist"
+    )
+    user_domain = home / "Library" / "Preferences" / f"{AMPHETAMINE_BUNDLE_ID}.plist"
+    return (container, user_domain)
+
+
+def read_amphetamine_preferences(paths: Sequence[Path] | None = None) -> dict[str, Any] | None:
+    """Return the first readable Amphetamine plist, or None.
+
+    The first path that exists and parses wins, so a sandboxed container file
+    is not overridden by a stale user-domain defaults file. Unreadable files
+    are skipped. This function does not create or modify plists.
+    """
+    candidates = tuple(paths) if paths is not None else amphetamine_preference_paths()
+    for path in candidates:
+        try:
+            payload = plistlib.loads(path.read_bytes())
+        except (OSError, plistlib.InvalidFileException, ValueError):
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def parse_closed_display_sleep_allowed(preferences: dict[str, Any] | None) -> bool | None:
+    """Return whether Amphetamine allows sleep when the display is closed.
+
+    True means the Session Defaults checkbox is on (a closed lid may sleep).
+    False means it is off (closed-lid setup coffee can use). None means the
+    saved preference is missing or not a boolean, so the checkbox is not
+    confirmed. Absent is not treated as the app's factory default.
+    """
+    if not preferences or AMPHETAMINE_CLOSED_DISPLAY_SLEEP_KEY not in preferences:
+        return None
+    value = preferences[AMPHETAMINE_CLOSED_DISPLAY_SLEEP_KEY]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool) and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes"}:
+            return True
+        if lowered in {"0", "false", "no"}:
+            return False
+    return None
+
+
+def read_closed_display_sleep_allowed(paths: Sequence[Path] | None = None) -> bool | None:
+    """Read the closed-display Session Defaults checkbox. Never writes it."""
+    return parse_closed_display_sleep_allowed(read_amphetamine_preferences(paths))
+
+
+@dataclass(frozen=True)
+class AmphetamineReadiness:
+    """Whether the next hold may use Amphetamine, and the line to log if not.
+
+    ``state`` is ``ready``, ``skipped`` (``--pmset``), ``missing``,
+    ``not-usable``, or ``not-configured``. Only ``ready`` selects Amphetamine.
+    ``reason`` is the backend explanation, including "using pmset instead"
+    whenever Amphetamine is not used.
+    """
+
+    state: str
+    reason: str
+
+
+def assess_amphetamine(
+    *,
+    force_pmset: bool,
+    installed: bool,
+    usable: bool,
+    closed_display_sleep_allowed: bool | None,
+) -> AmphetamineReadiness:
+    """Decide if Amphetamine is ready for a closed-lid hold.
+
+    Order:
+    1. ``--pmset`` skips Amphetamine. That path needs no App Store install.
+    2. No app bundle → missing. pmset is the hold.
+    3. Bundle without a MacOS executable → not usable. pmset is the hold.
+    4. Checkbox saved on, or not saved at all → not configured. pmset is the hold.
+    5. Checkbox saved off → ready. Amphetamine may start a session.
+
+    The checkbox cannot be flipped from AppleScript. A missing preference is
+    not assumed off: coffee only trusts a saved false value.
+    """
+    if force_pmset:
+        return AmphetamineReadiness(
+            "skipped",
+            "pmset requested (--pmset); zero-setup, Amphetamine is not required",
+        )
+    if not installed:
+        return AmphetamineReadiness(
+            "missing",
+            "Amphetamine is not installed; using pmset instead",
+        )
+    if not usable:
+        return AmphetamineReadiness(
+            "not-usable",
+            "Amphetamine is installed but the app bundle cannot be launched; using pmset instead",
+        )
+    if closed_display_sleep_allowed is None:
+        return AmphetamineReadiness(
+            "not-configured",
+            "Amphetamine is installed but closed-lid Session Defaults are not confirmed off; "
+            "using pmset instead",
+        )
+    if closed_display_sleep_allowed:
+        return AmphetamineReadiness(
+            "not-configured",
+            "Amphetamine still allows system sleep when the display is closed; using pmset instead",
+        )
+    return AmphetamineReadiness(
+        "ready",
+        "Amphetamine is installed and Session Defaults disallow sleep when the display is closed",
+    )
+
+
+def choose_backend(readiness: AmphetamineReadiness) -> tuple[str, str]:
+    """Return ``(backend, why)``. Amphetamine only when ``readiness`` is ready."""
+    if readiness.state == "ready":
+        return "amphetamine", readiness.reason
+    return "pmset", readiness.reason
+
+
+def _pmset_switch_line(*, dry_run: bool, until: str) -> str:
+    verb = "Would use" if dry_run else "Using"
+    return f"{verb} pmset instead (`sudo pmset -a disablesleep 1`) {until}"
+
+
+def amphetamine_fallback_lines(
+    readiness: AmphetamineReadiness,
+    *,
+    dry_run: bool,
+) -> tuple[str, ...]:
+    """Setup steps and the pmset switch, for the log and for ``lf coffee status``.
+
+    Empty when Amphetamine is ready or when the user passed ``--pmset``.
+    Callers print every line. The switch must stay visible; do not drop it
+    when shortening output.
+    """
+    checkbox = (
+        'Setup: uncheck Session Defaults → "Allow system sleep when display is closed" once. '
+        "Amphetamine's scripting API cannot change that checkbox, and coffee will not change it."
+    )
+    zero_setup = "`lf coffee --pmset` is the zero-setup path and does not need Amphetamine."
+    if readiness.state == "missing":
+        return (
+            "Amphetamine is not installed, so coffee cannot use it.",
+            "Setup: install Amphetamine from the Mac App Store (free). `lf coffee setup` opens that page.",
+            checkbox,
+            _pmset_switch_line(
+                dry_run=dry_run,
+                until="until Amphetamine is installed and that checkbox is off.",
+            ),
+            zero_setup,
+        )
+    if readiness.state == "not-configured":
+        return (
+            "Amphetamine is installed, but it is not configured for a closed lid.",
+            checkbox,
+            "coffee uses Amphetamine only when that preference is saved off "
+            f"(`{AMPHETAMINE_CLOSED_DISPLAY_SLEEP_KEY}` is false). "
+            "If the box is already unchecked, toggle it once so Amphetamine saves it. "
+            "coffee reads the saved value and will not write it.",
+            _pmset_switch_line(dry_run=dry_run, until="until that checkbox is off."),
+            "`lf coffee setup` opens Amphetamine. " + zero_setup,
+        )
+    if readiness.state == "not-usable":
+        return (
+            "Amphetamine is installed but not usable, so coffee cannot start a session with it.",
+            "Setup: reinstall Amphetamine from the Mac App Store if it will not open. "
+            "`lf coffee setup` opens that page.",
+            checkbox,
+            _pmset_switch_line(dry_run=dry_run, until="for this run."),
+            zero_setup,
+        )
+    return ()
+
+
+def session_failed_readiness() -> AmphetamineReadiness:
+    """Readiness after Amphetamine was selected but the session would not start."""
+    return AmphetamineReadiness(
+        "not-usable",
+        "Amphetamine session could not be started; using pmset instead",
+    )
+
+
+@dataclass(frozen=True)
+class AmphetamineSetupPlan:
+    """One GUI open for ``lf coffee setup`` or the first-run helper.
+
+    ``kind`` is ``mas`` (Mac App Store CLI), ``url`` (public App Store page),
+    or ``app`` (Amphetamine itself). ``message`` is a single line for the user.
+    Nothing here writes Session Defaults.
+    """
+
+    kind: str
+    argv: tuple[str, ...]
+    message: str
+
+
+def plan_amphetamine_setup(
+    *,
+    installed: bool,
+    mas_on_path: bool,
+    closed_display_sleep_allowed: bool | None = None,
+) -> AmphetamineSetupPlan:
+    """Choose how to open Amphetamine's install page or the app.
+
+    Not installed: ``mas open`` when the ``mas`` CLI is on PATH, otherwise
+    ``open`` of the public App Store URL. Installed: open the app. There is
+    no scripting command for Preferences, so the message tells the user which
+    checkbox to uncheck, unless that preference is already saved off.
+    """
+    if not installed:
+        if mas_on_path:
+            return AmphetamineSetupPlan(
+                "mas",
+                ("mas", "open", AMPHETAMINE_APP_STORE_ID),
+                "Opening the Amphetamine page in the Mac App Store with mas. "
+                "Install it, then uncheck Session Defaults → "
+                '"Allow system sleep when display is closed" once. '
+                "`lf coffee --pmset` needs no Amphetamine.",
+            )
+        return AmphetamineSetupPlan(
+            "url",
+            ("open", AMPHETAMINE_APP_STORE_URL),
+            "Opening the Amphetamine App Store page. "
+            "Install it, then uncheck Session Defaults → "
+            '"Allow system sleep when display is closed" once. '
+            "`lf coffee --pmset` needs no Amphetamine.",
+        )
+    if closed_display_sleep_allowed is False:
+        return AmphetamineSetupPlan(
+            "app",
+            ("open", "-a", "Amphetamine"),
+            "Opened Amphetamine. Session Defaults already disallow system sleep "
+            "when the display is closed. coffee did not change that checkbox.",
+        )
+    return AmphetamineSetupPlan(
+        "app",
+        ("open", "-a", "Amphetamine"),
+        AMPHETAMINE_SESSION_DEFAULTS_NOTE,
+    )
+
+
+def run_setup_plan(
+    plan: AmphetamineSetupPlan,
+    run: Run | None = None,
+) -> AmphetamineSetupPlan:
+    """Open the planned page or app. ``mas`` failure retries the public URL.
+
+    Returns the plan that actually ran so the caller prints that line.
+    Does not install Amphetamine and does not write its preferences.
+    """
+    runner = default_run if run is None else run
+    try:
+        runner(list(plan.argv), interactive=False, timeout=30)
+    except CommandError:
+        if plan.kind != "mas":
+            raise
+        # ``mas`` is installed but could not open the listing (not signed in,
+        # or an older mas without ``open``). The public URL is the same page.
+        fallback = plan_amphetamine_setup(installed=False, mas_on_path=False)
+        runner(list(fallback.argv), interactive=False, timeout=30)
+        return fallback
+    return plan
+
+
 def start_session_script() -> str:
     """AppleScript for a display-sleep-friendly Amphetamine session.
 
@@ -222,15 +545,6 @@ def start_session_url() -> str:
         "amphetamine://start-new-session?"
         f"duration={AMPHETAMINE_SESSION_HOURS}&interval=hours&displaySleepAllowed=true"
     )
-
-
-def choose_backend(*, force_pmset: bool, amphetamine_present: bool) -> tuple[str, str]:
-    """Return ``(backend, why)``. Amphetamine wins unless ``--pmset`` is set."""
-    if force_pmset:
-        return "pmset", "pmset requested (--pmset)"
-    if amphetamine_present:
-        return "amphetamine", "Amphetamine is installed"
-    return "pmset", "Amphetamine is not installed; falling back to pmset"
 
 
 def pmset_argv(value: int, *, interactive: bool) -> list[str]:
