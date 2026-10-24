@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -28,6 +29,12 @@ else:
 
 
 HOME = "/Users/lf"
+# Rich help styles each piece of a flag (`--idle-seconds`) in its own span on CI.
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _plain(text: str) -> str:
+    return _ANSI_ESCAPE.sub("", text or "")
 
 
 def _agent(key: str = "abc", name: str = "Fix cache", workspace: str = "/Users/lf/src/api") -> "coffee_activity.BusyAgent":
@@ -867,13 +874,19 @@ class CoffeeCliTests(unittest.TestCase):
         self.assertTrue(command.invoke_without_command)
 
     def test_help_lists_the_subcommand_and_flags(self) -> None:
-        result = CliRunner().invoke(coffee.app, ["--help"])
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("status", result.output)
-        self.assertIn("stop", result.output)
+        result = CliRunner().invoke(
+            coffee.app,
+            ["--help"],
+            color=False,
+            env={"NO_COLOR": "1", "TERM": "dumb"},
+        )
+        text = _plain((result.output or "") + (result.stderr or ""))
+        self.assertEqual(result.exit_code, 0, text)
+        self.assertIn("status", text)
+        self.assertIn("stop", text)
+        self.assertIn("setup", text)
         for flag in ("--idle-seconds", "--poll-seconds", "--pmset", "--allow-battery", "--dry-run", "--verbose"):
-            self.assertIn(flag, result.output)
-        self.assertIn("setup", result.output)
+            self.assertIn(flag, text)
 
     def test_non_macos_refuses_without_changing_sleep(self) -> None:
         result = CliRunner().invoke(coffee.app, [])
