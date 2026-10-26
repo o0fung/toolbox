@@ -612,18 +612,19 @@ The `browser` setting is an optional command template for `--browse`; `%s` is re
 
 Keep a Mac awake while a **local** Cursor agent is working, including with the lid closed, then allow sleep when that work is finished. Cloud agents do not hold the machine awake.
 
-Foreground is the default so the terminal shows the session. A line is printed only when the lid, the active agent, or the sleep hold changes (`--verbose` prints every poll).
+Foreground is the default so the terminal shows the session. While the lid is open, coffee still takes and releases the sleep hold, and it prints nothing about that. A line is printed when the lid closes, when that closed-lid decision changes, and for a real system sleep or user wake (`--verbose` also prints every agent and hold change, maintenance wakes, and every poll).
 
 ```text
-07:43:01  lid open (best-effort; AppleClamshellState=No)
-07:44:10  agent busy: Fix cache (id abc, workspace ~/src/api)
-07:44:10  hold acquired (Amphetamine session via osascript, display sleep allowed, 12h)
-07:44:40  lid closed (best-effort; AppleClamshellState=Yes)
-07:44:40  agent busy: Fix cache (id abc, workspace ~/src/api)
-07:51:02  agent finished: Fix cache (id abc, workspace ~/src/api)
-07:51:02  all local agents idle; releasing sleep hold
-07:51:02  sleeping / hold released (Amphetamine session ended)
+07:44:40  lid closed; no external display, so this is not clamshell; 1 local agent busy; sleep hold on; Wi-Fi on
+07:44:40    Fix cache (id abc, workspace ~/src/api)
+07:51:02  local agents idle; releasing sleep hold
+07:51:02  sleep hold released (Amphetamine session ended)
+08:05:16  system sleep started about 07:51:10 (Maintenance Sleep, asleep ~14m)
+08:05:16  woke at 08:05:01 (lid)
+08:05:16  lid opened
 ```
+
+An external display, power, and an external keyboard and mouse is Apple's clamshell mode. The lid line then says `clamshell (external display connected)`. Without the display, closing the lid is not clamshell. Coffee keeps the sleep hold and, while a local agent is busy, turns the Wi-Fi radio back on if macOS powered it off. `Wi-Fi still down; agent is not finished` means the radio is on with no route, or it would not stay on. The antennas are in the display, so a shut lid can still be too weak to hold a connection.
 
 If Amphetamine is missing or not ready for a closed lid, coffee says so and names the switch to pmset before it holds sleep:
 
@@ -640,7 +641,7 @@ If Amphetamine is missing or not ready for a closed lid, coffee says so and name
 lf coffee
 lf coffee --idle-seconds 90 --poll-seconds 15
 lf coffee --pmset
-lf coffee --allow-battery
+lf coffee --ac-only
 lf coffee --dry-run
 lf coffee --verbose
 lf coffee setup
@@ -648,7 +649,9 @@ lf coffee status
 lf coffee stop
 ```
 
-Lid state comes from IORegistry `AppleClamshellState` (`Yes` means closed). That sensor is best-effort: desktops and some VMs do not expose it, and the line says so.
+Lid state comes from IORegistry `AppleClamshellState` (`Yes` means closed). That sensor is best-effort: desktops and some VMs do not expose it, and the line says so. A closed lid names clamshell or not, how many local agents are busy, and Wi-Fi. Closing the lid is not itself system sleep. An external display is detected from `system_profiler` connection types other than `Internal`.
+
+`sleep hold released` means coffee stopped blocking sleep. The Mac may still be awake. System sleep and the user waking the Mac are separate lines. The coffee process is frozen while the Mac is suspended, so those lines show up on the next poll after wake, with the wake time from `kern.waketime` and an approximate sleep start from how long the process was frozen. A wake from before `lf coffee` started is not printed. Maintenance wakes that leave the screen off are printed only with `--verbose`, unless the Mac slept while the hold was still on. `lf coffee status` repeats the latest lid, system sleep, and wake lines.
 
 **Backends**
 
@@ -657,15 +660,15 @@ Lid state comes from IORegistry `AppleClamshellState` (`Yes` means closed). That
 - Otherwise coffee prints those setup steps and uses `sudo pmset -a disablesleep 1`. The log says Amphetamine was not ready and that pmset is the backend for this run. `lf coffee status` repeats that. The first foreground start also opens the App Store page, or Amphetamine if it is installed but the checkbox is still on. Later starts keep printing the steps and do not open the page again. `lf coffee setup` opens it on demand (`mas open` when the `mas` CLI is installed, otherwise the public App Store URL; the app itself when it is already installed).
 - sudo may prompt once for pmset. The previous value is restored on normal exit, Ctrl+C / SIGTERM, and if the coffee process dies (a detached helper plus a lock file under `~/.config/lf-toolbox/coffee/`). If both the daemon and the helper are killed, the next `lf coffee`, `lf coffee status`, or `lf coffee stop` clears a leftover `disablesleep`. `caffeinate` is not used; it does not keep the Mac awake with the lid closed.
 
-AC power is required unless `--allow-battery` is set. On battery, coffee reports the agent but does not hold sleep.
+Battery holds sleep by default, including when the power source cannot be read. The battery can run down while a local agent is busy, including with the lid closed. The hold still drops when every local agent is idle. `lf coffee --ac-only` requires AC power and reports the agent without holding sleep on battery. `--allow-battery` is the same as the default.
 
 **Detection** is heuristic. There is no Cursor API for "the agent is generating". coffee watches:
 
 - `~/.cursor/projects/<project>/agent-transcripts/**/*.jsonl` (local IDE and cursor-agent transcripts, including subagents)
 - `~/.cursor/chats/<hash>/<id>/store.db` (local cursor-agent store)
-- `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` composer headers and `composerData:<id>` (`status` such as `generating`)
+- `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` `composerHeaders` table (older Cursor builds: `ItemTable` key `composer.composerHeaders`) and `composerData:<id>`
 
-A fresh transcript counts as busy. Plan approval, `CreatePlan`, `AskQuestion`, and phrases such as "waiting for you to execute" release the hold immediately. Otherwise the hold drops after `--idle-seconds` (default 120) without local agent output. Composer rows tagged as background/cloud agents are ignored. A `generating` status that never updates again is ignored after 30 minutes. Tune `--idle-seconds` if a long silent tool call releases the hold early.
+Each status line leads with the chat title from the composer header. When that title is missing, the line uses about the first 80 characters of the first user message, so a session is not shown as only its id. A fresh transcript counts as busy. A local run also stays busy while `unfinishedRunAt` is set and the newest of the conversation checkpoint, `lastUpdatedAt`, and that run stamp is inside 30 minutes, including through a quiet stretch with no new transcript writes. That includes plan mode before the plan is handed over. `status: generating` still counts. A transcript whose last record is an error `turn_ended` (a failed model connection) stays busy for that same 30 minutes, including when a pending plan is also set, because Cursor retries without writing the file. A bare `turn_ended` between steps does not. Plan approval, `hasPendingPlan`, a blocking question, `CreatePlan`, `AskQuestion`, and phrases such as "waiting for you to execute" release the hold immediately when the turn did not end in that error. A transcript with no unfinished run and no error ending drops after `--idle-seconds` (default 120) without local agent output. An unfinished run is not cleared by that quiet period. Composer rows tagged as background/cloud agents are ignored. A `generating` status, an unfinished run, or an error ending that never updates again is ignored after 30 minutes.
 
 ---
 

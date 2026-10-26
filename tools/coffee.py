@@ -13,9 +13,11 @@ disablesleep 1`` instead, and says so in the log. ``--pmset`` selects that
 path up front. The previous ``disablesleep`` value is restored on exit,
 on SIGINT/SIGTERM, and if this process dies.
 
-The foreground process prints a short line when the lid, the active agent,
-or the sleep hold changes so a closed-lid session can be checked from the
-terminal that started it.
+The foreground process stays quiet while the lid is open. It prints one
+summary when the lid closes (clamshell or not, how many agents, whether
+Wi-Fi is up) and when that closed-lid decision changes. System sleep and a
+user wake are separate lines, printed after the Mac wakes. ``--verbose``
+prints every agent and hold change. Releasing the hold is not system sleep.
 """
 
 from __future__ import annotations
@@ -143,10 +145,15 @@ def emit(text: str, *, now: datetime | None = None) -> None:
 
 
 def release_line(note: str) -> str:
+    """Say the sleep hold is gone.
+
+    This is coffee's decision. It does not mean macOS has entered system
+    sleep; that is a separate line printed after the Mac wakes.
+    """
     cleaned = " ".join(note.split())
     if cleaned:
-        return f"sleeping / hold released ({cleaned})"
-    return "sleeping / hold released"
+        return f"sleep hold released ({cleaned})"
+    return "sleep hold released"
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -239,12 +246,16 @@ def _backend_label(backend: Any) -> str:
     return str(name) if name else "unknown"
 
 
+_EVENT_NAMES = ("lid", "sleep", "wake")
+
+
 def _state_payload(
     controller: HoldController,
     snapshot: activity.MonitorSnapshot,
     config: CoffeeConfig,
+    events: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "pid": os.getpid(),
         "backend": _backend_label(controller.backend),
         "hold": controller.held,
@@ -268,6 +279,47 @@ def _state_payload(
         "backend_reason": controller.backend_reason,
         "amphetamine": controller.amphetamine_state,
     }
+    if events:
+        payload["events"] = events
+    return payload
+
+
+def _load_events(state_dir: Path) -> dict[str, dict[str, Any]]:
+    """Keep the last lid, sleep, and wake across polls and restarts.
+
+    A new coffee process rewrites state.json on the first poll. Loading the
+    previous events first means ``lf coffee status`` still shows a sleep that
+    already finished.
+    """
+    state = _read_json(state_dir / "state.json")
+    raw = state.get("events") if state else None
+    if not isinstance(raw, dict):
+        return {}
+    loaded: dict[str, dict[str, Any]] = {}
+    for key in _EVENT_NAMES:
+        item = raw.get(key)
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        at = item.get("at")
+        loaded[key] = {"text": text, "at": at if isinstance(at, (int, float)) else None}
+    return loaded
+
+
+def _remember_events(
+    events: dict[str, dict[str, Any]],
+    steps: list[activity.StatusStep],
+    *,
+    now: float,
+) -> None:
+    """Record monitored events. Later polls must not drop earlier ones."""
+    for step in steps:
+        if step.kind != "log" or step.event not in _EVENT_NAMES:
+            continue
+        at = step.event_at if isinstance(step.event_at, (int, float)) else now
+        events[step.event] = {"text": step.text, "at": at}
 
 
 def _format_saved_agent(payload: dict[str, Any]) -> str:
@@ -297,6 +349,7 @@ def _print_saved_state(state_dir: Path, *, running: bool) -> None:
     lid = state.get("lid", "unknown")
     detail = state.get("lid_detail") or "best-effort"
     info(f"{prefix}lid: {lid} ({detail})")
+    _print_events(state, prefix=prefix)
     info(f"{prefix}power: {state.get('power', 'unknown')}")
     info(f"{prefix}agent: {state.get('phase', 'unknown')}")
     agents = state.get("agents")
@@ -312,6 +365,33 @@ def _print_saved_state(state_dir: Path, *, running: bool) -> None:
     updated = state.get("updated_at")
     if isinstance(updated, (int, float)):
         info(f"{prefix}updated: {datetime.fromtimestamp(updated).strftime('%H:%M:%S')}")
+
+
+def _print_events(state: dict[str, Any], *, prefix: str) -> None:
+    """Print the latest lid, system sleep, and user wake.
+
+    Sleep and wake lines already carry their own clock time. The lid line
+    does not, so its observed time is added here.
+    """
+    events = state.get("events")
+    if not isinstance(events, dict):
+        return
+    # "last " is already the prefix when coffee is stopped. The label itself
+    # stays "lid event" so a stopped run does not print "last last lid".
+    labels = (("lid", "lid event"), ("sleep", "sleep event"), ("wake", "wake event"))
+    for key, label in labels:
+        item = events.get(key)
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if not isinstance(text, str) or not text:
+            continue
+        at = item.get("at")
+        if key == "lid" and isinstance(at, (int, float)):
+            stamp = datetime.fromtimestamp(at).strftime("%H:%M:%S")
+            info(f"{prefix}{label}: {text} ({stamp})")
+        else:
+            info(f"{prefix}{label}: {text}")
 
 
 def _emit_banner(config: CoffeeConfig, backend_name: str, why: str) -> None:
@@ -335,7 +415,10 @@ def _emit_banner(config: CoffeeConfig, backend_name: str, why: str) -> None:
         "detection is heuristic (local transcripts and composer status) and may need "
         f"--idle-seconds tuning. Cloud agents are ignored. "
         f"Idle {config.idle_seconds}s, poll {config.poll_seconds}s. "
-        "Lid state is best-effort."
+        "Lid state is best-effort. With the lid open the log stays quiet. "
+        "A closed lid without an external display is not clamshell mode; "
+        "coffee turns Wi-Fi back on if macOS powered the radio off. "
+        "System sleep and a user wake are printed on the next poll after the Mac wakes."
     )
 
 
@@ -355,7 +438,7 @@ def _observe(config: CoffeeConfig) -> activity.MonitorSnapshot:
         config_dir=activity.default_cursor_config_dir(),
         user_dir=activity.default_cursor_user_dir(),
     )
-    lid = awake.read_lid_state()
+    platform = awake.read_platform_state()
     power = awake.read_power_source()
     transition = activity.transition_hold(
         phase=decision.phase,
@@ -363,9 +446,19 @@ def _observe(config: CoffeeConfig) -> activity.MonitorSnapshot:
         allow_battery=config.allow_battery,
     )
     block = transition.reason if decision.phase is activity.AgentPhase.BUSY and not transition.hold else None
+    recorded = platform.power
+    external_display: bool | None = None
+    wifi_note: str | None = None
+    # Only a closed lid needs the display and Wi-Fi read. Restoring the radio
+    # is limited to a busy agent with no external display: real clamshell
+    # already keeps the network up, and an idle closed lid is allowed to sleep.
+    if platform.lid.position == "closed":
+        network = awake.assess_closed_lid_network(restore_wifi=bool(decision.agents))
+        external_display = network.external_display
+        wifi_note = network.wifi_note
     return activity.MonitorSnapshot(
-        lid=lid.position,
-        lid_detail=lid.detail,
+        lid=platform.lid.position,
+        lid_detail=platform.lid.detail,
         agents=decision.agents,
         phase=decision.phase,
         reason=decision.reason,
@@ -373,6 +466,14 @@ def _observe(config: CoffeeConfig) -> activity.MonitorSnapshot:
         want_hold=transition.hold,
         block_reason=block,
         warning=decision.warning,
+        external_display=external_display,
+        wifi_note=wifi_note,
+        sleep_reason=recorded.sleep_reason,
+        wake_reason=recorded.wake_reason,
+        wake_type=recorded.wake_type,
+        user_wake=recorded.user_wake,
+        sleep_wake_id=recorded.sleep_wake_id,
+        wake_at=recorded.wake_at,
     )
 
 
@@ -385,9 +486,9 @@ def _apply_steps(
 ) -> None:
     """Print status lines and change the hold between them.
 
-    A ``release`` step is executed before ``sleeping / hold released`` so the
+    A ``release`` step is executed before ``sleep hold released`` so the
     final line means the backend has already restored sleep (or reported why
-    it could not).
+    it could not). That line is coffee's hold, not macOS entering system sleep.
     """
     for step in steps:
         if step.kind == "log":
@@ -418,7 +519,8 @@ def _apply_steps(
                     on_acquire_failure()
                     emit(f"could not acquire sleep hold: {exc}")
                     continue
-            emit(f"hold acquired ({note})")
+            if not step.quiet:
+                emit(f"hold acquired ({note})")
             continue
         if step.kind == "release":
             try:
@@ -426,7 +528,8 @@ def _apply_steps(
             except awake.CommandError as exc:
                 emit(f"could not release sleep hold: {exc}")
                 continue
-            emit(release_line(note))
+            if not step.quiet:
+                emit(release_line(note))
 
 
 def _maintain(controller: HoldController, warned: dict[str, bool]) -> None:
@@ -547,10 +650,14 @@ def _maybe_open_setup_helper(
 def serve(config: CoffeeConfig) -> None:
     """Poll local Cursor activity and hold sleep only while it is busy.
 
-    Each iteration reads the lid, power source, and local agent signals, then
-    prints a line only when something changed. The order when work finishes is:
-    one ``agent finished`` line per agent, ``all local agents idle; releasing
-    sleep hold``, the backend restore, then ``sleeping / hold released``.
+    Each iteration reads the lid, the last system sleep/wake, the power
+    source, and local agent signals. With the lid open the hold still tracks
+    agents, but the log stays quiet. A closed lid prints one summary,
+    including whether an external display makes this clamshell and whether
+    Wi-Fi is up. While the lid stays closed, the next line is a hold change
+    or Wi-Fi crossing to still-down. A real system sleep is printed later,
+    on the first poll after the Mac wakes. ``--verbose`` keeps the per-agent
+    lines.
 
     Observation errors do not immediately drop a hold that is already on.
     Three failed polls in a row release it, so a stuck reader cannot pin the
@@ -621,6 +728,12 @@ def serve(config: CoffeeConfig) -> None:
     warned = {"refresh": False, "sudo": False}
     last_maintenance = time.monotonic()
     state_path = state_dir / "state.json"
+    events = _load_events(state_dir)
+    # How long the previous poll wait was frozen. The first pass has not
+    # waited yet. Wall time jumps during system sleep and the monotonic
+    # clock does not, so their difference is the suspend length. Measuring
+    # only the wait keeps a slow Cursor read from looking like sleep.
+    suspended_seconds = 0.0
 
     def _note_acquire_failure() -> None:
         nonlocal acquire_retry_at
@@ -644,7 +757,10 @@ def serve(config: CoffeeConfig) -> None:
                 ):
                     snapshot = replace(previous, warning=warning)
                 else:
-                    snapshot = activity.MonitorSnapshot(
+                    # Keep the last sleep/wake identity. Clearing it would make
+                    # the next good poll look like a baseline, and a real wake
+                    # during the blip would never be printed.
+                    failed = activity.MonitorSnapshot(
                         lid="unknown",
                         lid_detail="best-effort; observation failed",
                         agents=(),
@@ -655,12 +771,24 @@ def serve(config: CoffeeConfig) -> None:
                         block_reason=None,
                         warning=warning,
                     )
+                    if previous is not None:
+                        failed = replace(
+                            failed,
+                            sleep_reason=previous.sleep_reason,
+                            wake_reason=previous.wake_reason,
+                            wake_type=previous.wake_type,
+                            user_wake=previous.user_wake,
+                            sleep_wake_id=previous.sleep_wake_id,
+                            wake_at=previous.wake_at,
+                        )
+                    snapshot = failed
 
             steps = activity.plan_status_events(
                 previous,
                 snapshot,
                 hold=controller.held,
                 verbose=config.verbose,
+                suspended_seconds=suspended_seconds,
             )
             if (
                 snapshot.want_hold
@@ -668,19 +796,36 @@ def serve(config: CoffeeConfig) -> None:
                 and time.monotonic() >= acquire_retry_at
                 and not any(step.kind == "acquire" for step in steps)
             ):
-                steps.append(activity.StatusStep("acquire", ""))
+                # A retry while the lid is open stays quiet. Closing the lid, or
+                # --verbose, is when a successful acquire is worth a line.
+                steps.append(
+                    activity.StatusStep(
+                        "acquire",
+                        "",
+                        quiet=not config.verbose and snapshot.lid != "closed",
+                    )
+                )
+            _remember_events(events, steps, now=time.time())
             _apply_steps(steps, controller, state_dir, on_acquire_failure=_note_acquire_failure)
             if controller.held:
                 acquire_retry_at = float("inf")
             previous = snapshot
             try:
-                _write_json(state_path, _state_payload(controller, snapshot, config))
+                _write_json(state_path, _state_payload(controller, snapshot, config, events))
             except OSError as exc:
                 emit(f"could not write status file: {exc}")
             if time.monotonic() - last_maintenance >= 60:
                 _maintain(controller, warned)
                 last_maintenance = time.monotonic()
+            wait_wall = time.time()
+            wait_mono = time.monotonic()
             time.sleep(config.poll_seconds)
+            # System sleep advances wall time and pauses the monotonic clock.
+            # The difference is how long this wait was frozen, which the next
+            # poll uses to estimate when sleep started.
+            suspended_seconds = (time.time() - wait_wall) - (time.monotonic() - wait_mono)
+            if suspended_seconds < 0:
+                suspended_seconds = 0.0
     except KeyboardInterrupt:
         pass
     finally:
@@ -692,7 +837,7 @@ def serve(config: CoffeeConfig) -> None:
             emit("stopping")
         if previous is not None:
             try:
-                _write_json(state_path, _state_payload(controller, previous, config))
+                _write_json(state_path, _state_payload(controller, previous, config, events))
             except OSError:
                 pass
 
@@ -765,9 +910,9 @@ def coffee(
         help="Use sudo pmset disablesleep instead of Amphetamine.",
     ),
     allow_battery: bool = typer.Option(
-        False,
-        "--allow-battery",
-        help="Hold sleep on battery too. The default requires AC power.",
+        True,
+        "--allow-battery/--ac-only",
+        help="Hold sleep on battery. This is the default. --ac-only requires AC power.",
     ),
     dry_run: bool = typer.Option(
         False,
@@ -784,15 +929,23 @@ def coffee(
         False,
         "-V",
         "--verbose",
-        help="Print a line on every poll, not only when lid, agent, or hold state changes.",
+        help=(
+            "Print a line on every poll, plus every agent and hold change, "
+            "and print maintenance wakes. The default stays quiet while the "
+            "lid is open and prints a summary when the lid closes."
+        ),
     ),
 ) -> None:
     """Hold this Mac awake while a local Cursor agent is working.
 
-    Runs in the foreground and prints a timestamped line when the lid, the
-    active agent, or the sleep hold changes. Cloud agents do not keep the
-    hold. When every local agent is idle, coffee releases the hold so the
-    Mac may sleep. Ctrl+C restores sleep settings before exiting.
+    Runs in the foreground. With the lid open it stays quiet while it keeps
+    the sleep hold in step with local agents. When the lid closes it prints
+    one summary: clamshell or not, how many agents, and whether Wi-Fi is up.
+    A closed lid without an external display is not clamshell mode; coffee
+    turns Wi-Fi back on if macOS powered the radio off. Cloud agents do not
+    keep the hold. A connection error is not treated as the agent finishing.
+    The Mac actually sleeping is a later line, printed after it wakes.
+    Ctrl+C restores sleep settings before exiting.
     """
     if ctx.invoked_subcommand is not None:
         return
@@ -855,7 +1008,7 @@ def setup() -> None:
 
 @app.command("status")
 def status() -> None:
-    """Show Amphetamine readiness, the backend, the lid, and the last agent state."""
+    """Show Amphetamine readiness, the backend, the lid, the last sleep and wake, and the last agent state."""
     _status()
 
 

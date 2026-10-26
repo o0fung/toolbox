@@ -32,7 +32,7 @@ import sys
 import time
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -103,6 +103,40 @@ class LidState:
     detail: str
 
 
+@dataclass(frozen=True)
+class PowerEventState:
+    """Last system sleep and wake macOS recorded.
+
+    These describe the machine, not coffee's sleep hold. ``wake_at`` is epoch
+    seconds from ``kern.waketime``. None means that read failed, not that a
+    wake just happened.
+    """
+
+    sleep_reason: str | None
+    wake_reason: str | None
+    wake_type: str | None
+    user_wake: bool | None
+    sleep_wake_id: str | None
+    wake_at: float | None = None
+
+
+@dataclass(frozen=True)
+class PlatformState:
+    """Lid plus the last sleep/wake from one poll."""
+
+    lid: LidState
+    power: PowerEventState
+
+
+# IOPMrootDomain has the clamshell and the sleep/wake keys together. The
+# second command is only a fallback when that class is missing.
+_IOREG_ARGV = (
+    ["ioreg", "-c", "IOPMrootDomain", "-d", "2"],
+    ["ioreg", "-r", "-k", "AppleClamshellState", "-d", "4"],
+)
+_WAKETIME_RE = re.compile(r"sec\s*=\s*(\d+)(?:\D+?usec\s*=\s*(\d+))?")
+
+
 def parse_clamshell_state(text: str) -> tuple[str, str | None]:
     """Parse ``AppleClamshellState`` from ``ioreg`` output.
 
@@ -123,20 +157,239 @@ def parse_clamshell_state(text: str) -> tuple[str, str | None]:
     return "unknown", token
 
 
-def read_lid_state(run: Run = default_run) -> LidState:
-    """Read the lid via ioreg. Failures become ``unknown`` with a best-effort note."""
-    for argv in (
-        ["ioreg", "-c", "IOPMrootDomain", "-d", "2"],
-        ["ioreg", "-r", "-k", "AppleClamshellState", "-d", "4"],
-    ):
+def _iter_ioreg_text(run: Run) -> Iterator[str]:
+    for argv in _IOREG_ARGV:
         try:
             result = run(argv, interactive=False, timeout=3)
         except CommandError:
             continue
-        position, token = parse_clamshell_state(result.stdout)
+        if result.stdout:
+            yield result.stdout
+
+
+def _ioreg_value(text: str, key: str) -> str | None:
+    """Return one IORegistry property.
+
+    Quoted values keep their inner text (``"Clamshell Sleep"``). Bare values
+    such as ``Yes`` are taken up to the next whitespace.
+    """
+    match = re.search(
+        rf'"{re.escape(key)}"\s*=\s*(?:"([^"]*)"|([^\s]+))',
+        text or "",
+    )
+    if not match:
+        return None
+    raw = match.group(1) if match.group(1) is not None else match.group(2)
+    cleaned = raw.strip()
+    return cleaned or None
+
+
+def _yes_no(token: str | None) -> bool | None:
+    if token is None:
+        return None
+    lowered = token.strip().lower()
+    if lowered in {"yes", "true", "1"}:
+        return True
+    if lowered in {"no", "false", "0"}:
+        return False
+    return None
+
+
+def parse_power_events(text: str) -> PowerEventState:
+    """Parse the last sleep and wake out of an IOPMrootDomain dump.
+
+    ``IOPMUserTriggeredFullWake`` is Yes when the user woke the Mac (lid,
+    keyboard, trackpad, or power button) and No for a maintenance wake that
+    leaves the screen off. A missing key stays None.
+    """
+    return PowerEventState(
+        sleep_reason=_ioreg_value(text, "Last Sleep Reason"),
+        wake_reason=_ioreg_value(text, "Wake Reason"),
+        wake_type=_ioreg_value(text, "Wake Type"),
+        user_wake=_yes_no(_ioreg_value(text, "IOPMUserTriggeredFullWake")),
+        sleep_wake_id=_ioreg_value(text, "SleepWakeUUID"),
+    )
+
+
+def parse_waketime(text: str) -> float | None:
+    """Parse ``sysctl kern.waketime`` into epoch seconds.
+
+    The line looks like ``{ sec = 1792885281, usec = 416992 } Sun Oct 25 ...``.
+    """
+    match = _WAKETIME_RE.search(text or "")
+    if not match:
+        return None
+    seconds = int(match.group(1))
+    usec = int(match.group(2) or "0")
+    return seconds + usec / 1_000_000
+
+
+def read_waketime(run: Run = default_run) -> float | None:
+    try:
+        result = run(["sysctl", "-n", "kern.waketime"], interactive=False, timeout=3)
+    except CommandError:
+        return None
+    return parse_waketime(result.stdout)
+
+
+def _power_identity(state: PowerEventState) -> bool:
+    return bool(state.sleep_wake_id or state.sleep_reason or state.wake_reason)
+
+
+def read_platform_state(run: Run = default_run) -> PlatformState:
+    """Read the lid and the last sleep/wake.
+
+    One IOPMrootDomain dump usually has both the clamshell and the sleep
+    keys. Desktops omit the clamshell; the lid stays unknown and the sleep
+    keys are still kept. Wake time is ``kern.waketime``, read once per call.
+    """
+    lid = LidState("unknown", "best-effort; AppleClamshellState not available")
+    power = parse_power_events("")
+    for text in _iter_ioreg_text(run):
+        position, token = parse_clamshell_state(text)
+        if lid.position == "unknown" and token is not None and position != "unknown":
+            lid = LidState(position, f"best-effort; AppleClamshellState={token}")
+        events = parse_power_events(text)
+        if not _power_identity(power) and _power_identity(events):
+            power = events
+        # Stop once this dump answered both questions. A later dump is only
+        # a fallback for machines that split the keys.
+        if lid.position != "unknown" and power.sleep_wake_id:
+            break
+    return PlatformState(lid=lid, power=replace(power, wake_at=read_waketime(run)))
+
+
+def read_lid_state(run: Run = default_run) -> LidState:
+    """Read the lid via ioreg. Failures become ``unknown`` with a best-effort note."""
+    for text in _iter_ioreg_text(run):
+        position, token = parse_clamshell_state(text)
         if position != "unknown" and token is not None:
             return LidState(position, f"best-effort; AppleClamshellState={token}")
     return LidState("unknown", "best-effort; AppleClamshellState not available")
+
+
+_CONNECTION_RE = re.compile(r"Connection Type:\s*(.+)", re.IGNORECASE)
+_WIFI_PORT_RE = re.compile(
+    r"Hardware Port:\s*(?:Wi-Fi|AirPort)\s*\nDevice:\s*(\S+)",
+    re.IGNORECASE,
+)
+_AIRPORT_POWER_RE = re.compile(r":\s*(On|Off)\s*$", re.IGNORECASE | re.MULTILINE)
+_DISPLAYS_ARGV = ["system_profiler", "SPDisplaysDataType"]
+_WIFI_PORTS_ARGV = ["networksetup", "-listallhardwareports"]
+
+
+@dataclass(frozen=True)
+class ClosedLidNetwork:
+    """Display and Wi-Fi facts for one closed-lid poll.
+
+    ``external_display`` is None when the display list could not be read.
+    True is Apple's clamshell setup (an external display is connected).
+    ``wifi_note`` is the phrase for the status line. None means Wi-Fi was
+    not read on this poll.
+    """
+
+    external_display: bool | None
+    wifi_note: str | None
+
+
+def parse_external_display(text: str) -> bool | None:
+    """Return whether ``system_profiler`` shows a display that is not built in.
+
+    ``Internal`` is the laptop panel. Any other connection type is an
+    external display, which is what turns lid-close into clamshell mode.
+    No connection lines means the read did not answer the question.
+    """
+    kinds = [match.group(1).strip().lower() for match in _CONNECTION_RE.finditer(text or "")]
+    if not kinds:
+        return None
+    return any(kind not in {"internal", "built-in"} for kind in kinds)
+
+
+def parse_wifi_device(text: str) -> str | None:
+    match = _WIFI_PORT_RE.search(text or "")
+    return match.group(1) if match else None
+
+
+def parse_airport_power(text: str) -> str | None:
+    """Return ``on`` or ``off`` from ``networksetup -getairportpower``."""
+    match = _AIRPORT_POWER_RE.search(text or "")
+    if not match:
+        return None
+    return match.group(1).lower()
+
+
+def parse_has_default_route(text: str) -> bool:
+    return "gateway:" in (text or "").lower()
+
+
+def wifi_note(*, power: str | None, restored: bool, has_route: bool) -> str:
+    """Phrase for the lid line.
+
+    Restored means this poll turned the radio back on. A radio that is on
+    with no default route, or a radio that stayed off, is still down.
+    """
+    if restored:
+        return "Wi-Fi was off; turned it back on"
+    if power == "on" and has_route:
+        return "Wi-Fi on"
+    if power == "on" or power == "off":
+        return "Wi-Fi still down"
+    return "Wi-Fi unreadable"
+
+
+def _capture(run: Run, argv: Sequence[str], *, timeout: float = 20) -> CommandResult | None:
+    try:
+        return run(argv, interactive=False, timeout=timeout)
+    except CommandError:
+        return None
+
+
+def _read_wifi_parts(run: Run) -> tuple[str | None, str | None, bool]:
+    """Return ``(device, power, has_route)``. Missing pieces stay None/False."""
+    ports = _capture(run, _WIFI_PORTS_ARGV, timeout=5)
+    device = parse_wifi_device(ports.stdout) if ports is not None else None
+    power: str | None = None
+    if device:
+        reading = _capture(run, ["networksetup", "-getairportpower", device], timeout=5)
+        if reading is not None:
+            power = parse_airport_power(reading.stdout)
+    route = _capture(run, ["route", "-n", "get", "default"], timeout=5)
+    has_route = route is not None and parse_has_default_route(route.stdout)
+    return device, power, has_route
+
+
+def _power_wifi_on(run: Run, device: str) -> bool:
+    """Turn the Wi-Fi radio on. ``sudo -n`` is the fallback when the first try needs admin.
+
+    Interactive sudo is not used. A password prompt would stall the poll.
+    """
+    if _capture(run, ["networksetup", "-setairportpower", device, "on"], timeout=10) is not None:
+        return True
+    return _capture(run, ["sudo", "-n", "networksetup", "-setairportpower", device, "on"], timeout=10) is not None
+
+
+def assess_closed_lid_network(run: Run = default_run, *, restore_wifi: bool = False) -> ClosedLidNetwork:
+    """Read clamshell-vs-closed-lid, and optionally turn Wi-Fi back on.
+
+    An external display is real clamshell: macOS keeps the session awake and
+    coffee does not power the radio. With no display (or an unreadable
+    display list), and ``restore_wifi``, a radio macOS turned off is switched
+    back on. The radio can be on and still have no route; the note says so
+    and the caller must not treat the agent as finished.
+    """
+    displays = _capture(run, _DISPLAYS_ARGV, timeout=20)
+    external = parse_external_display(displays.stdout) if displays is not None else None
+    # Clamshell already leaves the radio under macOS. Only the no-display
+    # path, and only while an agent is busy, tries to turn Wi-Fi back on.
+    should_restore = restore_wifi and external is not True
+    device, power, has_route = _read_wifi_parts(run)
+    restored = False
+    if should_restore and power == "off" and device and _power_wifi_on(run, device):
+        device, power, has_route = _read_wifi_parts(run)
+        restored = power == "on"
+    if external is True or should_restore:
+        return ClosedLidNetwork(external, wifi_note(power=power, restored=restored, has_route=has_route))
+    return ClosedLidNetwork(external, None)
 
 
 def parse_power_source(text: str) -> str:
