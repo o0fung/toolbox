@@ -27,6 +27,7 @@ import os
 import plistlib
 import re
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -67,6 +68,44 @@ class CommandError(RuntimeError):
 
 
 Run = Callable[..., CommandResult]
+
+
+def real_home() -> Path:
+    """Home of the user who started coffee, including under ``sudo``.
+
+    ``sudo`` points ``HOME`` at ``/var/root``. Cursor transcripts and the
+    coffee state directory live in the invoking user's home.
+    """
+    if os.geteuid() == 0:
+        import pwd
+
+        uid_text = os.environ.get("SUDO_UID")
+        if uid_text:
+            try:
+                return Path(pwd.getpwuid(int(uid_text)).pw_dir)
+            except (KeyError, ValueError, OverflowError):
+                pass
+        name = os.environ.get("SUDO_USER")
+        if name:
+            try:
+                return Path(pwd.getpwnam(name).pw_dir)
+            except KeyError:
+                pass
+    return Path.home()
+
+
+def chown_invoker(path: Path) -> None:
+    """Give a root-created file back to the user who ran ``sudo lf coffee``."""
+    if os.geteuid() != 0:
+        return
+    uid_text = os.environ.get("SUDO_UID")
+    if not uid_text:
+        return
+    gid_text = os.environ.get("SUDO_GID") or uid_text
+    try:
+        os.chown(path, int(uid_text), int(gid_text))
+    except (OSError, ValueError, OverflowError):
+        return
 
 
 def default_run(
@@ -431,6 +470,12 @@ def read_power_source(run: Run = default_run) -> str:
     return parse_power_source(result.stdout)
 
 
+def read_pmset_log(run: Run = default_run) -> str:
+    """Return ``pmset -g log``. Callers read it once after the Mac wakes."""
+    result = run(["pmset", "-g", "log"], interactive=False, timeout=8)
+    return result.stdout
+
+
 def read_disablesleep(run: Run = default_run) -> int | None:
     """Return the current disablesleep value.
 
@@ -450,7 +495,7 @@ def read_disablesleep(run: Run = default_run) -> int | None:
 def amphetamine_app_paths() -> tuple[Path, ...]:
     return (
         Path("/Applications/Amphetamine.app"),
-        Path.home() / "Applications" / "Amphetamine.app",
+        real_home() / "Applications" / "Amphetamine.app",
     )
 
 
@@ -498,7 +543,7 @@ def amphetamine_preference_paths() -> tuple[Path, ...]:
     reads. The user-domain plist is only consulted when that container file is
     absent. coffee never writes either file.
     """
-    home = Path.home()
+    home = real_home()
     container = (
         home
         / "Library"
@@ -799,7 +844,14 @@ def start_session_url() -> str:
     )
 
 
-def pmset_argv(value: int, *, interactive: bool) -> list[str]:
+def pmset_argv(value: int, *, interactive: bool, direct: bool = False) -> list[str]:
+    """``disablesleep`` command. Direct skips sudo because the caller is root.
+
+    The helper and a ``sudo lf coffee`` process are root for the whole run,
+    so a later sleep cannot expire a sudo ticket and ask again.
+    """
+    if direct or os.geteuid() == 0:
+        return ["/usr/bin/pmset", "-a", "disablesleep", str(int(value))]
     argv = ["sudo", "pmset", "-a", "disablesleep", str(int(value))]
     if not interactive:
         argv.insert(1, "-n")
@@ -853,9 +905,11 @@ def read_lock(path: Path) -> HoldLock | None:
 
 def write_lock(path: Path, lock: HoldLock) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    chown_invoker(path.parent)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(lock.to_json(), indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, path)
+    chown_invoker(path)
 
 
 def clear_lock(path: Path) -> None:
@@ -885,7 +939,9 @@ def exclusive_hold(state_dir: Path) -> Iterator[None]:
     import fcntl
 
     state_dir.mkdir(parents=True, exist_ok=True)
-    fd = os.open(state_dir / "hold.flock", os.O_CREAT | os.O_RDWR, 0o644)
+    flock_path = state_dir / "hold.flock"
+    fd = os.open(flock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    chown_invoker(flock_path)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
@@ -908,18 +964,18 @@ def _end_amphetamine(run: Run) -> None:
     raise CommandError(["osascript"], 1, "; ".join(errors))
 
 
-def _restore_pmset(previous: int, run: Run) -> str:
+def _restore_pmset(previous: int, run: Run, *, direct: bool = False) -> str:
     current = read_disablesleep(run)
     if current == previous:
         return f"disablesleep already {previous}"
-    run(pmset_argv(previous, interactive=False), interactive=False, timeout=30)
+    run(pmset_argv(previous, interactive=False, direct=direct), interactive=False, timeout=30)
     return f"pmset disablesleep {previous}"
 
 
-def _apply_restore(lock: HoldLock, run: Run) -> str:
+def _apply_restore(lock: HoldLock, run: Run, *, direct: bool = False) -> str:
     if lock.backend == "pmset":
         previous = 0 if lock.previous_disablesleep is None else lock.previous_disablesleep
-        return _restore_pmset(previous, run)
+        return _restore_pmset(previous, run, direct=direct)
     if lock.backend == "amphetamine":
         _end_amphetamine(run)
         return "Amphetamine session ended"
@@ -932,6 +988,7 @@ def recover_orphan_lock(
     only_pid: int | None = None,
     run: Run = default_run,
     pid_alive_fn: Callable[[int], bool] = pid_alive,
+    direct: bool = False,
 ) -> str | None:
     """Restore sleep if the coffee process that took the hold is gone.
 
@@ -949,7 +1006,7 @@ def recover_orphan_lock(
         if pid_alive_fn(lock.pid):
             return None
         try:
-            detail = _apply_restore(lock, run)
+            detail = _apply_restore(lock, run, direct=direct)
         except CommandError as exc:
             return f"could not restore sleep hold: {exc}"
         current = read_lock(path)
@@ -1000,8 +1057,322 @@ def supervise(
     recover_orphan_lock(state_dir, only_pid=parent_pid, run=run)
 
 
+@dataclass(frozen=True)
+class PmsetReply:
+    """One answer from the root pmset helper."""
+
+    ok: bool
+    note: str
+    owns: bool
+
+
+class PmsetHelperClient:
+    """Send acquire, release, and watch requests to the root helper.
+
+    The helper process stays root for the life of coffee, so a sleep that
+    outlasts the sudo ticket does not ask for the password again.
+    """
+
+    def __init__(self, sock_path: Path):
+        self.sock_path = sock_path
+
+    def acquire(self) -> PmsetReply:
+        # The pid is the coffee process taking the hold. The helper follows
+        # that pid even if a parent started it and has not called watch yet.
+        return self._call({"op": "acquire", "pid": os.getpid()})
+
+    def release(self) -> PmsetReply:
+        return self._call({"op": "release"})
+
+    def watch(self, pid: int) -> PmsetReply:
+        """Follow ``pid`` instead of the process that started the helper."""
+        return self._call({"op": "watch", "pid": int(pid)})
+
+    def quit(self) -> PmsetReply:
+        return self._call({"op": "quit"})
+
+    def _call(self, payload: dict[str, object]) -> PmsetReply:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(30)
+        try:
+            sock.connect(str(self.sock_path))
+            sock.sendall((json.dumps(payload) + "\n").encode())
+            data = b""
+            while b"\n" not in data:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+                if len(data) > 65536:
+                    break
+        except OSError as exc:
+            raise CommandError(["pmset-helper"], 1, str(exc)) from exc
+        finally:
+            sock.close()
+        line = data.split(b"\n", 1)[0]
+        try:
+            body = json.loads(line.decode() or "{}")
+        except json.JSONDecodeError as exc:
+            raise CommandError(["pmset-helper"], 1, "helper reply was not JSON") from exc
+        if not isinstance(body, dict) or not body.get("ok"):
+            detail = ""
+            if isinstance(body, dict):
+                detail = str(body.get("error") or "")
+            raise CommandError(["pmset-helper"], 1, detail or "hold was not taken")
+        return PmsetReply(True, str(body.get("note") or ""), bool(body.get("owns")))
+
+
+def _helper_socket_path(state_dir: Path) -> Path:
+    return state_dir / "pmset.sock"
+
+
+def _spawn_pmset_helper(state_dir: Path, watch_pid: int) -> subprocess.Popen[bytes]:
+    """Start the helper. ``sudo -n`` is enough because ``sudo -v`` just ran."""
+    env = os.environ.copy()
+    root = str(Path(__file__).resolve().parents[1])
+    env["PYTHONPATH"] = root + os.pathsep + env.get("PYTHONPATH", "")
+    command = [sys.executable, "-m", "tools.coffee_awake", "pmset-helper", str(state_dir), str(watch_pid)]
+    if os.geteuid() != 0:
+        command = ["sudo", "-n", *command]
+    log_path = state_dir / "pmset-helper.log"
+    handle = open(log_path, "a", encoding="utf-8")
+    # Stay in this terminal long enough for ``sudo -n`` to see the ticket
+    # from ``sudo -v``. The helper calls ``setsid`` once it is root, so a
+    # later Ctrl+C does not kill it before it can restore sleep.
+    try:
+        return subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            env=env,
+            cwd=root,
+            close_fds=True,
+        )
+    finally:
+        handle.close()
+
+
+def start_pmset_helper(state_dir: Path, watch_pid: int) -> PmsetHelperClient:
+    """Start the helper and wait until its socket accepts connections."""
+    sock_path = _helper_socket_path(state_dir)
+    try:
+        sock_path.unlink()
+    except FileNotFoundError:
+        pass
+    proc = _spawn_pmset_helper(state_dir, watch_pid)
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if sock_path.exists():
+            return PmsetHelperClient(sock_path)
+        if proc.poll() is not None:
+            break
+        time.sleep(0.05)
+    raise CommandError(["pmset-helper"], 1, "pmset helper did not start")
+
+
+def _read_helper_request(conn: socket.socket) -> dict[str, Any] | None:
+    data = b""
+    while b"\n" not in data:
+        try:
+            chunk = conn.recv(4096)
+        except OSError:
+            return None
+        if not chunk:
+            return None
+        data += chunk
+        if len(data) > 65536:
+            return None
+    try:
+        payload = json.loads(data.split(b"\n", 1)[0].decode())
+    except (UnicodeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _reply_helper(conn: socket.socket, payload: dict[str, object]) -> None:
+    try:
+        conn.sendall((json.dumps(payload) + "\n").encode())
+    except OSError:
+        return
+
+
+def serve_pmset_helper(
+    state_dir: Path,
+    watch_pid: int,
+    *,
+    run: Run = default_run,
+    pid_alive_fn: Callable[[int], bool] = pid_alive,
+    poll_seconds: float = 1.0,
+) -> None:
+    """Own ``disablesleep`` until the watched coffee process exits.
+
+    The helper is root. It only runs ``/usr/bin/pmset -a disablesleep 0|1``.
+    Flow:
+    1. Restore a lock whose coffee process is already dead.
+    2. Listen on a user-owned socket. Each connection is one request:
+       acquire, release, watch (follow a new pid), or quit.
+    3. Between requests, if the watched pid is gone, restore the previous
+       ``disablesleep`` and exit. A sleep cannot drop this privilege.
+    """
+    # A leftover hold from a killed coffee is cleared before this run takes one.
+    try:
+        recover_orphan_lock(state_dir, run=run, pid_alive_fn=pid_alive_fn, direct=True)
+    except CommandError:
+        pass
+
+    sock_path = _helper_socket_path(state_dir)
+    try:
+        sock_path.unlink()
+    except FileNotFoundError:
+        pass
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(sock_path))
+    listener.listen(4)
+    os.chmod(sock_path, 0o600)
+    chown_invoker(sock_path)
+    listener.settimeout(poll_seconds)
+
+    watched = {"pid": watch_pid}
+    owns = False
+    previous: int | None = None
+    lock_path = state_dir / "hold.lock"
+
+    def restore_owned() -> str | None:
+        # None means this helper does not own the setting. A failed pmset
+        # leaves the lock in place for the next coffee run.
+        nonlocal owns, previous
+        if not owns:
+            return None
+        saved = 0 if previous is None else previous
+        detail = _restore_pmset(saved, run, direct=True)
+        with exclusive_hold(state_dir):
+            current = read_lock(lock_path)
+            if current is not None and current.pid == watched["pid"]:
+                clear_lock(lock_path)
+        owns = False
+        previous = None
+        return detail
+
+    def on_acquire() -> dict[str, object]:
+        nonlocal owns, previous
+        # Already holding: another acquire is the same pmset value.
+        if owns:
+            return {"ok": True, "note": "pmset disablesleep 1", "owns": True}
+        with exclusive_hold(state_dir):
+            current = read_disablesleep(run)
+            if current is None:
+                return {"ok": False, "error": "could not read disablesleep", "owns": False}
+            if current == 1:
+                return {
+                    "ok": True,
+                    "note": "disablesleep already 1; leaving it unchanged",
+                    "owns": False,
+                }
+            previous = current
+            write_lock(
+                lock_path,
+                HoldLock(
+                    pid=watched["pid"],
+                    backend="pmset",
+                    previous_disablesleep=current,
+                    acquired=True,
+                ),
+            )
+        try:
+            run(pmset_argv(1, interactive=False, direct=True), interactive=False, timeout=30)
+        except CommandError as exc:
+            with exclusive_hold(state_dir):
+                current_lock = read_lock(lock_path)
+                if current_lock is not None and current_lock.pid == watched["pid"]:
+                    clear_lock(lock_path)
+            previous = None
+            return {"ok": False, "error": str(exc), "owns": False}
+        owns = True
+        return {"ok": True, "note": "pmset disablesleep 1", "owns": True}
+
+    def on_release() -> dict[str, object]:
+        if not owns:
+            return {"ok": True, "note": "disablesleep was already set; left unchanged", "owns": False}
+        try:
+            detail = restore_owned()
+        except CommandError as exc:
+            return {"ok": False, "error": str(exc), "owns": True}
+        return {"ok": True, "note": detail or "pmset disablesleep 0", "owns": False}
+
+    try:
+        while True:
+            if not pid_alive_fn(watched["pid"]):
+                try:
+                    restore_owned()
+                except CommandError:
+                    pass
+                break
+            try:
+                conn, _addr = listener.accept()
+            except (TimeoutError, socket.timeout):
+                continue
+            except OSError:
+                continue
+            try:
+                payload = _read_helper_request(conn)
+                if payload is None:
+                    _reply_helper(conn, {"ok": False, "error": "bad request", "owns": owns})
+                    continue
+                op = payload.get("op")
+                # Only these four operations. The helper never runs a shell.
+                if op == "acquire":
+                    # Follow the process that is taking the hold before the
+                    # lock is written, so a background parent can exit without
+                    # the lock still naming that parent.
+                    try:
+                        caller = int(payload.get("pid") or 0)
+                    except (TypeError, ValueError):
+                        caller = 0
+                    if caller > 0:
+                        watched["pid"] = caller
+                    _reply_helper(conn, on_acquire())
+                elif op == "release":
+                    reply = on_release()
+                    _reply_helper(conn, reply)
+                elif op == "watch":
+                    try:
+                        pid = int(payload.get("pid", 0))
+                    except (TypeError, ValueError):
+                        pid = 0
+                    if pid <= 0:
+                        _reply_helper(conn, {"ok": False, "error": "watch pid is invalid", "owns": owns})
+                    else:
+                        watched["pid"] = pid
+                        _reply_helper(conn, {"ok": True, "note": "watching", "owns": owns})
+                elif op == "quit":
+                    try:
+                        detail = restore_owned()
+                    except CommandError as exc:
+                        _reply_helper(conn, {"ok": False, "error": str(exc), "owns": owns})
+                        continue
+                    _reply_helper(conn, {"ok": True, "note": detail or "stopped", "owns": False})
+                    break
+                else:
+                    _reply_helper(conn, {"ok": False, "error": "unknown op", "owns": owns})
+            finally:
+                conn.close()
+    finally:
+        listener.close()
+        try:
+            sock_path.unlink()
+        except OSError:
+            pass
+
+
 class PmsetBackend:
-    """Own ``disablesleep`` only when this process is the one that turned it on."""
+    """Own ``disablesleep`` only when this process is the one that turned it on.
+
+    A ``client`` talks to the root helper started once at the beginning of
+    the run. That path does not call sudo again. Without a client, a root
+    process calls ``/usr/bin/pmset`` directly and any other process still
+    uses sudo (tests, and a leftover restore from ``lf coffee status``).
+    """
 
     name = "pmset"
 
@@ -1010,14 +1381,20 @@ class PmsetBackend:
         state_dir: Path,
         run: Run = default_run,
         spawn: Callable[[Path, int], object] | None = None,
+        client: "PmsetHelperClient | None" = None,
     ):
         self.state_dir = state_dir
         self.run = run
         self.spawn = spawn or spawn_supervisor
+        self.client = client
         self.owns_setting = False
         self._supervisor: object | None = None
 
     def acquire(self) -> str:
+        if self.client is not None:
+            reply = self.client.acquire()
+            self.owns_setting = reply.owns
+            return reply.note
         # Read and record the previous value before changing it, but do not
         # hold the flock across the sudo prompt. The supervisor covers death
         # during the prompt; it checks the lock pid so it will not clobber a
@@ -1039,9 +1416,10 @@ class PmsetBackend:
                     acquired=True,
                 ),
             )
+        direct = os.geteuid() == 0
         try:
             self._supervisor = self.spawn(self.state_dir, os.getpid())
-            self.run(pmset_argv(1, interactive=True), interactive=True, timeout=120)
+            self.run(pmset_argv(1, interactive=not direct, direct=direct), interactive=not direct, timeout=120)
         except Exception:
             with exclusive_hold(self.state_dir):
                 current_lock = read_lock(lock_path)
@@ -1050,9 +1428,17 @@ class PmsetBackend:
             self.owns_setting = False
             raise
         self.owns_setting = True
+        if direct:
+            return "pmset disablesleep 1"
         return "sudo pmset -a disablesleep 1"
 
     def release(self) -> str:
+        if self.client is not None:
+            if not self.owns_setting:
+                return "disablesleep was already set; left unchanged"
+            reply = self.client.release()
+            self.owns_setting = False
+            return reply.note
         if not self.owns_setting:
             return "disablesleep was already set; left unchanged"
         with exclusive_hold(self.state_dir):
@@ -1064,8 +1450,12 @@ class PmsetBackend:
             return detail
 
     def keep_warm(self) -> bool:
-        """Refresh the sudo timestamp so a later death can restore without a prompt."""
-        if not self.owns_setting:
+        """Refresh the sudo timestamp so a later death can restore without a prompt.
+
+        The root helper and a process that is already root do not use a
+        sudo ticket, so there is nothing to refresh.
+        """
+        if self.client is not None or os.geteuid() == 0 or not self.owns_setting:
             return True
         try:
             self.run(["sudo", "-n", "-v"], interactive=False, timeout=10)
@@ -1158,8 +1548,28 @@ class AmphetamineBackend:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Supervisor entry: ``python -m tools.coffee_awake supervise STATE_DIR PID``."""
+    """Helper entry.
+
+    ``python -m tools.coffee_awake supervise STATE_DIR PID`` restores a hold
+    after that pid exits. ``pmset-helper`` is the root process that applies
+    ``disablesleep`` for the life of the run.
+    """
     args = list(sys.argv[1:] if argv is None else argv)
+    if len(args) == 3 and args[0] == "pmset-helper":
+        if os.geteuid() != 0:
+            print("pmset helper must be root", file=sys.stderr)
+            return 1
+        # Leave the coffee process group so Ctrl+C does not kill the helper
+        # before it restores disablesleep. Tests call serve_pmset_helper
+        # directly and must not detach the test process.
+        try:
+            os.setsid()
+        except OSError:
+            pass
+        state_dir = Path(args[1])
+        watch_pid = int(args[2])
+        serve_pmset_helper(state_dir, watch_pid)
+        return 0
     if len(args) == 3 and args[0] == "supervise":
         state_dir = Path(args[1])
         parent_pid = int(args[2])
@@ -1182,7 +1592,8 @@ def main(argv: list[str] | None = None) -> int:
             recover_orphan_lock(state_dir, only_pid=parent_pid)
         return 0
     print(
-        "usage: python -m tools.coffee_awake supervise STATE_DIR PARENT_PID",
+        "usage: python -m tools.coffee_awake supervise STATE_DIR PARENT_PID\n"
+        "       python -m tools.coffee_awake pmset-helper STATE_DIR WATCH_PID",
         file=sys.stderr,
     )
     return 2

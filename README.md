@@ -612,29 +612,24 @@ The `browser` setting is an optional command template for `--browse`; `%s` is re
 
 Keep a Mac awake while a **local** Cursor agent is working, including with the lid closed, then allow sleep when that work is finished. Cloud agents do not hold the machine awake.
 
-Foreground is the default so the terminal shows the session. While the lid is open, coffee still takes and releases the sleep hold, and it prints nothing about that. A line is printed when the lid closes, when that closed-lid decision changes, and for a real system sleep or user wake (`--verbose` also prints every agent and hold change, maintenance wakes, and every poll).
+Foreground is the default so the terminal shows the session. While the lid is open, coffee still takes and releases the sleep hold, and it prints nothing about that. A line is printed when the lid closes, when that closed-lid decision changes, and once after the Mac wakes (`--verbose` also prints every sleep cycle, every agent and hold change, and every poll).
 
 ```text
-07:44:40  lid closed; no external display, so this is not clamshell; 1 local agent busy; sleep hold on; Wi-Fi on
-07:44:40    Fix cache (id abc, workspace ~/src/api)
-07:51:02  local agents idle; releasing sleep hold
-07:51:02  sleep hold released (Amphetamine session ended)
-08:05:16  system sleep started about 07:51:10 (Maintenance Sleep, asleep ~14m)
-08:05:16  woke at 08:05:01 (lid)
-08:05:16  lid opened
+2026-11-07 07:44:40  lid closed; no external display, so this is not clamshell; 1 local agent busy; sleep hold on; Wi-Fi on
+2026-11-07 07:44:40    Fix cache (id abc, workspace ~/src/api)
+2026-11-07 07:51:02  local agents idle; releasing sleep hold
+2026-11-07 07:51:02  hold off (Amphetamine session ended)
+2026-11-07 08:05:16  asleep 07:51:10–08:05:01 · 14m · 3 sleeps, 2 dark wakes · last wake lid
+2026-11-07 08:05:16  lid opened
 ```
 
 An external display, power, and an external keyboard and mouse is Apple's clamshell mode. The lid line then says `clamshell (external display connected)`. Without the display, closing the lid is not clamshell. Coffee keeps the sleep hold and, while a local agent is busy, turns the Wi-Fi radio back on if macOS powered it off. `Wi-Fi still down; agent is not finished` means the radio is on with no route, or it would not stay on. The antennas are in the display, so a shut lid can still be too weak to hold a connection.
 
-If Amphetamine is missing or not ready for a closed lid, coffee says so and names the switch to pmset before it holds sleep:
+If Amphetamine is missing or not ready for a closed lid, startup is two lines and then the password. The checkbox steps stay on `lf coffee setup` and `lf coffee status`. `--verbose` prints them after the password.
 
 ```text
-07:43:01  Amphetamine is not installed, so coffee cannot use it.
-07:43:01  Setup: install Amphetamine from the Mac App Store (free). `lf coffee setup` opens that page.
-07:43:01  Setup: uncheck Session Defaults → "Allow system sleep when display is closed" once. Amphetamine's scripting API cannot change that checkbox, and coffee will not change it.
-07:43:01  Using pmset instead (`sudo pmset -a disablesleep 1`) until Amphetamine is installed and that checkbox is off.
-07:43:01  `lf coffee --pmset` is the zero-setup path and does not need Amphetamine.
-07:43:01  backend: pmset (Amphetamine is not installed; using pmset instead)
+2026-11-07 07:43:01  coffee · pmset · idle 120s · poll 20s
+2026-11-07 07:43:01  Amphetamine is not installed. Password once for this run.
 ```
 
 ```sh
@@ -651,14 +646,14 @@ lf coffee stop
 
 Lid state comes from IORegistry `AppleClamshellState` (`Yes` means closed). That sensor is best-effort: desktops and some VMs do not expose it, and the line says so. A closed lid names clamshell or not, how many local agents are busy, and Wi-Fi. Closing the lid is not itself system sleep. An external display is detected from `system_profiler` connection types other than `Internal`.
 
-`sleep hold released` means coffee stopped blocking sleep. The Mac may still be awake. System sleep and the user waking the Mac are separate lines. The coffee process is frozen while the Mac is suspended, so those lines show up on the next poll after wake, with the wake time from `kern.waketime` and an approximate sleep start from how long the process was frozen. A wake from before `lf coffee` started is not printed. Maintenance wakes that leave the screen off are printed only with `--verbose`, unless the Mac slept while the hold was still on. `lf coffee status` repeats the latest lid, system sleep, and wake lines.
+`hold off` means coffee stopped blocking sleep. The Mac may still be awake. System sleep is one later line, printed on the next poll after the Mac wakes. That line counts every Sleep, Wake, and DarkWake from `pmset -g log` in the gap, so several cycles are not shown as one short sleep. A wake from before the gap, including one from before `lf coffee` started, is not printed. If the power log cannot be read, the line says the Mac was unavailable for about that long and does not invent a sleep start. Maintenance wakes stay in the summary when they are part of the gap. A gap with no user wake and no failed hold stays quiet unless `--verbose`. `hold was on` on that line means the Mac slept while coffee still held sleep. `lf coffee status` repeats the latest lid and sleep summary. Keywords such as `hold on`, `lid closed`, and `Wi-Fi still down` are colored on a terminal.
 
 **Backends**
 
 - `--pmset` is zero-setup. It does not need Amphetamine. coffee runs `sudo pmset -a disablesleep 1` and says that this path was requested.
 - Amphetamine, when `/Applications/Amphetamine.app` (or `~/Applications/Amphetamine.app`) is installed **and** Session Defaults are saved with **Allow system sleep when display is closed** unchecked. coffee reads that preference (`Allow Closed-Display Sleep` = false) and never writes it. The session allows display sleep (the screen may go black). Amphetamine's scripting API cannot toggle the checkbox.
-- Otherwise coffee prints those setup steps and uses `sudo pmset -a disablesleep 1`. The log says Amphetamine was not ready and that pmset is the backend for this run. `lf coffee status` repeats that. The first foreground start also opens the App Store page, or Amphetamine if it is installed but the checkbox is still on. Later starts keep printing the steps and do not open the page again. `lf coffee setup` opens it on demand (`mas open` when the `mas` CLI is installed, otherwise the public App Store URL; the app itself when it is already installed).
-- sudo may prompt once for pmset. The previous value is restored on normal exit, Ctrl+C / SIGTERM, and if the coffee process dies (a detached helper plus a lock file under `~/.config/lf-toolbox/coffee/`). If both the daemon and the helper are killed, the next `lf coffee`, `lf coffee status`, or `lf coffee stop` clears a leftover `disablesleep`. `caffeinate` is not used; it does not keep the Mac awake with the lid closed.
+- Otherwise coffee uses pmset and says so in one line before the password. `lf coffee status` and `lf coffee setup` still print the checkbox steps. The first foreground start also opens the App Store page, or Amphetamine if it is installed but the checkbox is still on. Later starts do not open the page again. `lf coffee setup` opens it on demand (`mas open` when the `mas` CLI is installed, otherwise the public App Store URL; the app itself when it is already installed).
+- The password is once per run. coffee runs `sudo -v`, then a root helper applies `pmset -a disablesleep`. The helper stays root, so a later sleep does not ask again. `sudo lf coffee` does not ask a second time; Cursor files and the state directory still come from the user who invoked sudo. The previous value is restored on normal exit, Ctrl+C / SIGTERM, and if the coffee process dies. If both the daemon and the helper are killed, the next `lf coffee` clears a leftover `disablesleep`. `caffeinate` is not used; it does not keep the Mac awake with the lid closed.
 
 Battery holds sleep by default, including when the power source cannot be read. The battery can run down while a local agent is busy, including with the lid closed. The hold still drops when every local agent is idle. `lf coffee --ac-only` requires AC power and reports the agent without holding sleep on battery. `--allow-battery` is the same as the default.
 

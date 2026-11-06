@@ -44,6 +44,11 @@ from pathlib import Path
 from typing import Callable, Iterable, Sequence
 from urllib.parse import unquote, urlparse
 
+try:
+    from .coffee_awake import real_home
+except ImportError:  # pragma: no cover - direct script execution fallback
+    from tools.coffee_awake import real_home
+
 
 DEFAULT_IDLE_SECONDS = 120
 DEFAULT_POLL_SECONDS = 20
@@ -188,6 +193,20 @@ class HoldTransition:
 
 
 @dataclass(frozen=True)
+class PowerLogEvent:
+    """One Sleep, Wake, or DarkWake row from ``pmset -g log``.
+
+    ``kind`` is ``sleep``, ``wake``, or ``darkwake``. ``reason`` is the short
+    cause already suitable for a status line (``Idle Sleep``, ``lid``,
+    ``power button``).
+    """
+
+    kind: str
+    at: float
+    reason: str
+
+
+@dataclass(frozen=True)
 class MonitorSnapshot:
     """One poll of lid + agent + power, as shown in the terminal."""
 
@@ -213,6 +232,11 @@ class MonitorSnapshot:
     # phrase for the lid line: Wi-Fi on, turned back on, or still down.
     external_display: bool | None = None
     wifi_note: str | None = None
+    # Cycles from ``pmset -g log`` inside the gap since the previous poll.
+    # None means the log was not read. An empty tuple means it was read and
+    # the window had no Sleep, Wake, or DarkWake row.
+    power_cycles: tuple[PowerLogEvent, ...] | None = None
+    power_log_read: bool = False
 
 
 @dataclass(frozen=True)
@@ -242,7 +266,7 @@ def default_cursor_config_dir() -> Path:
     override = os.environ.get("CURSOR_CONFIG_DIR")
     if override:
         return Path(override).expanduser()
-    return Path.home() / ".cursor"
+    return real_home() / ".cursor"
 
 
 def default_cursor_user_dir() -> Path:
@@ -253,12 +277,12 @@ def default_cursor_user_dir() -> Path:
     Windows: ``%APPDATA%/Cursor/User``
     """
     if os.name == "nt":
-        root = os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))
+        root = os.environ.get("APPDATA", str(real_home() / "AppData" / "Roaming"))
         return Path(root) / "Cursor" / "User"
     if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "Cursor" / "User"
+        return real_home() / "Library" / "Application Support" / "Cursor" / "User"
     xdg = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
+    base = Path(xdg).expanduser() if xdg else real_home() / ".config"
     return base / "Cursor" / "User"
 
 
@@ -1294,7 +1318,7 @@ _USER_WAKE_HINTS = ("lid", "clamshell", "keyboard", "trackpad", "power button", 
 
 def format_agent(agent: BusyAgent, *, home: str | None = None) -> str:
     """Format ``name (id ..., workspace ...)`` for one status line."""
-    home_path = str(Path.home()) if home is None else home
+    home_path = str(real_home()) if home is None else home
     ident = agent.composer_id or agent.key
     label = _short(agent.name or ident)
     details: list[str] = []
@@ -1309,19 +1333,6 @@ def format_agent(agent: BusyAgent, *, home: str | None = None) -> str:
 
 def _format_clock(epoch: float) -> str:
     return datetime.fromtimestamp(epoch).strftime("%H:%M:%S")
-
-
-def _format_asleep(seconds: float) -> str:
-    whole = max(0, int(round(seconds)))
-    if whole < 60:
-        return f"asleep ~{whole}s"
-    minutes = int(round(whole / 60))
-    if minutes < 60:
-        return f"asleep ~{minutes}m"
-    hours, leftover = divmod(minutes, 60)
-    if leftover:
-        return f"asleep ~{hours}h {leftover}m"
-    return f"asleep ~{hours}h"
 
 
 def _is_user_wake(current: MonitorSnapshot) -> bool:
@@ -1339,17 +1350,25 @@ def _is_user_wake(current: MonitorSnapshot) -> bool:
     return any(hint in blob for hint in _USER_WAKE_HINTS)
 
 
-def _wake_cause(current: MonitorSnapshot) -> str:
-    blob = f"{current.wake_reason or ''} {current.wake_type or ''}".lower()
+def _cause_from_text(text: str) -> str:
+    """Short wake cause from a registry string or one ``pmset -g log`` row."""
+    blob = (text or "").lower()
     if "lid" in blob or "clamshell" in blob:
         return "lid"
     if "keyboard" in blob:
         return "keyboard"
     if "trackpad" in blob:
         return "trackpad"
-    if "power button" in blob or "powerbutton" in blob:
+    if "pwrbtn" in blob or "power button" in blob or "powerbutton" in blob:
         return "power button"
-    return _short(current.wake_reason or current.wake_type or "unknown", 60)
+    if "maintenance" in blob or "rtc" in blob:
+        return "maintenance"
+    cleaned = _short(text, 60)
+    return cleaned or "unknown"
+
+
+def _wake_cause(current: MonitorSnapshot) -> str:
+    return _cause_from_text(f"{current.wake_reason or ''} {current.wake_type or ''}")
 
 
 def _sleep_cycle_changed(previous: MonitorSnapshot | None, current: MonitorSnapshot) -> bool:
@@ -1372,83 +1391,220 @@ def _sleep_cycle_changed(previous: MonitorSnapshot | None, current: MonitorSnaps
     return False
 
 
-def _lid_line(current: MonitorSnapshot) -> str:
+def _lid_line(current: MonitorSnapshot, *, hold: bool) -> str:
     """Describe the lid.
 
-    Closed is the action that matters: coffee's decision this poll either
-    keeps the Mac awake or lets it sleep. Open is just the lid. Unknown
+    Closed is the action that matters. ``hold`` is the hold already set,
+    not the one this poll is about to take. Open is just the lid. Unknown
     keeps the best-effort detail because desktops have no clamshell sensor.
     """
     if current.lid == "open":
         return "lid opened"
     if current.lid == "closed":
-        if current.want_hold:
+        if hold and current.want_hold:
             return "lid closed; sleep hold is on, Mac stays awake"
+        if current.want_hold:
+            return "lid closed"
         return "lid closed; sleep hold is off, Mac may sleep"
     return f"lid {current.lid} ({current.lid_detail})"
 
 
-def _report_sleep_cycle(current: MonitorSnapshot, *, hold: bool, verbose: bool) -> bool:
-    """Choose whether this sleep/wake cycle is worth a terminal line.
+_PMSET_LOG_LINE = re.compile(
+    r"^(?P<day>\d{4}-\d{2}-\d{2}) (?P<clock>\d{2}:\d{2}:\d{2}) (?P<tz>[+-]\d{4}) "
+    r"(?P<kind>DarkWake|Sleep|Wake)\s+(?P<rest>.*)$"
+)
+_SLEEP_REASON = re.compile(r"due to '([^']+)'")
 
-    A user wake is always reported. A maintenance wake is reported with
-    ``verbose``, and also when the sleep hold was still on, because that
-    means the hold did not keep the Mac awake.
+
+def parse_pmset_log(text: str, *, start: float, end: float) -> tuple[PowerLogEvent, ...]:
+    """Sleep and wake rows strictly after ``start`` and at or before ``end``.
+
+    A wake from before this gap is left out. That is the stale registry
+    case: ``kern.waketime`` can still name an older wake on the poll that
+    first notices a new sleep id.
     """
-    if _is_user_wake(current) or hold:
-        return True
-    return verbose
+    events: list[PowerLogEvent] = []
+    for raw in (text or "").splitlines():
+        match = _PMSET_LOG_LINE.match(raw.strip())
+        if not match:
+            continue
+        try:
+            at = datetime.strptime(
+                f"{match.group('day')} {match.group('clock')} {match.group('tz')}",
+                "%Y-%m-%d %H:%M:%S %z",
+            ).timestamp()
+        except ValueError:
+            continue
+        # One second of slack so a wake stamped on the poll second is kept.
+        if at <= start or at > end + 1:
+            continue
+        kind_token = match.group("kind")
+        rest = match.group("rest")
+        if kind_token == "Sleep":
+            reason_match = _SLEEP_REASON.search(rest)
+            kind = "sleep"
+            reason = reason_match.group(1) if reason_match else "sleep"
+        elif kind_token == "DarkWake":
+            kind = "darkwake"
+            reason = _cause_from_text(rest)
+        else:
+            kind = "wake"
+            reason = _cause_from_text(rest)
+        events.append(PowerLogEvent(kind, at, reason))
+    events.sort(key=lambda item: item.at)
+    return tuple(events)
 
 
-def _log_sleep_wake(
+def _format_span(seconds: float) -> str:
+    """Duration for a sleep summary. Minutes are rounded, not truncated."""
+    whole = max(0, int(round(seconds)))
+    if whole < 60:
+        return f"{whole}s"
+    minutes = int(round(whole / 60))
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, leftover = divmod(minutes, 60)
+    if leftover:
+        return f"{hours}h {leftover}m"
+    return f"{hours}h"
+
+
+def _format_range(start: float, end: float) -> str:
+    left = datetime.fromtimestamp(start)
+    right = datetime.fromtimestamp(end)
+    if left.date() == right.date():
+        return f"{left:%H:%M:%S}–{right:%H:%M:%S}"
+    return f"{left:%Y-%m-%d %H:%M:%S}–{right:%Y-%m-%d %H:%M:%S}"
+
+
+def _count_phrase(count: int, singular: str, plural: str) -> str:
+    return f"{count} {singular if count == 1 else plural}"
+
+
+def format_power_summary(cycles: Sequence[PowerLogEvent], *, hold: bool) -> str:
+    """One line for every cycle in a gap. The clocks come from the power log."""
+    start = cycles[0].at
+    end = cycles[-1].at
+    span = end - start if end > start else 0.0
+    parts = [f"asleep {_format_range(start, end)}", _format_span(span)]
+    sleeps = sum(1 for item in cycles if item.kind == "sleep")
+    dark = sum(1 for item in cycles if item.kind == "darkwake")
+    counts: list[str] = []
+    if sleeps:
+        counts.append(_count_phrase(sleeps, "sleep", "sleeps"))
+    if dark:
+        counts.append(_count_phrase(dark, "dark wake", "dark wakes"))
+    if counts:
+        parts.append(", ".join(counts))
+    last = next((item for item in reversed(cycles) if item.kind in {"wake", "darkwake"}), None)
+    if last is not None:
+        parts.append(f"last wake {last.reason}")
+    text = " · ".join(parts)
+    if hold:
+        text += " · hold was on"
+    return text
+
+
+def format_cycle_line(event: PowerLogEvent) -> str:
+    clock = _format_clock(event.at)
+    if event.kind == "sleep":
+        return f"sleep {clock} {event.reason}"
+    if event.kind == "darkwake":
+        return f"dark wake {clock} {event.reason}"
+    return f"wake {clock} {event.reason}"
+
+
+def format_unavailable(*, suspended_seconds: float, cause: str | None, hold: bool) -> str:
+    """Fallback when ``pmset -g log`` has no rows for this gap.
+
+    The freeze length is how long this process was stopped. It is not a
+    single sleep, so the line does not invent a start time.
+    """
+    if suspended_seconds >= _MIN_SUSPEND_SECONDS:
+        text = f"unavailable for about {_format_span(suspended_seconds)}"
+    else:
+        text = "unavailable"
+    if cause:
+        text += f" · last wake {cause}"
+    if hold:
+        text += " · hold was on"
+    return text
+
+
+def _wake_time_advanced(previous: MonitorSnapshot | None, current: MonitorSnapshot) -> bool:
+    """True when ``kern.waketime`` moved forward. An older stamp is stale."""
+    if current.wake_at is None or previous is None or previous.wake_at is None:
+        return False
+    return int(current.wake_at) > int(previous.wake_at)
+
+
+def _gap_has_user_wake(cycles: Sequence[PowerLogEvent]) -> bool:
+    return any(item.kind == "wake" for item in cycles)
+
+
+def _log_power_gap(
     log: Callable[[str, str | None, float | None], None],
+    previous: MonitorSnapshot | None,
     current: MonitorSnapshot,
     *,
     suspended_seconds: float,
     hold: bool,
+    verbose: bool,
 ) -> None:
-    """Print system sleep, then the wake.
+    """Print one summary for the sleep/wake gap since the previous poll.
 
-    Sleep start is not a field macOS leaves on IOPMrootDomain. It is the
-    wake time minus how long this process was frozen. A freeze under a few
-    seconds is too small to trust, so the line then names the reason only.
-    ``hold`` means the sleep hold was still on while the Mac suspended.
+    The process is frozen while the Mac is suspended, so one poll can cover
+    several real cycles. Rows from ``pmset -g log`` are that list. A freeze
+    length is only the fallback when the log has nothing in the window, and
+    it is not turned into one invented sleep start.
+
+    Flow:
+    1. Log rows exist. A user ``Wake`` is printed. Dark wakes alone stay
+       quiet unless the hold was on (the hold did not keep the Mac awake)
+       or ``verbose`` asked for every cycle. ``verbose`` lists each row,
+       then the same summary.
+    2. No rows. A ``kern.waketime`` that did not move forward is an older
+       wake and is not named. A long freeze with the hold on is still
+       reported, without that stale cause.
     """
-    reason = current.sleep_reason or "sleep reason unknown"
-    frozen = suspended_seconds if suspended_seconds >= _MIN_SUSPEND_SECONDS else 0.0
-    sleep_at: float | None = None
-    if current.wake_at is not None and frozen > 0:
-        estimated = current.wake_at - frozen
-        if estimated >= 0:
-            sleep_at = estimated
-    if sleep_at is not None:
-        text = f"system sleep started about {_format_clock(sleep_at)} ({reason}, {_format_asleep(frozen)})"
-    else:
-        text = f"system sleep started ({reason})"
-    if hold:
-        text += " while the sleep hold was on"
-    log(text, "sleep", sleep_at)
-
-    cause = _wake_cause(current)
-    user = _is_user_wake(current)
-    verb = "woke" if user else "maintenance wake"
-    if current.wake_at is None:
-        log(f"{verb} ({cause})", "wake", None)
+    cycles = current.power_cycles or ()
+    if cycles:
+        if not (verbose or hold or _gap_has_user_wake(cycles)):
+            return
+        if verbose:
+            for item in cycles:
+                log(format_cycle_line(item))
+        log(format_power_summary(cycles, hold=hold), "sleep", cycles[0].at)
         return
-    log(f"{verb} at {_format_clock(current.wake_at)} ({cause})", "wake", current.wake_at)
+
+    advanced = _wake_time_advanced(previous, current)
+    frozen = suspended_seconds >= _MIN_SUSPEND_SECONDS
+    if not advanced and not (frozen and (hold or verbose)):
+        return
+    if not hold and not verbose and not (advanced and _is_user_wake(current)):
+        return
+    cause = _wake_cause(current) if advanced else None
+    log(
+        format_unavailable(suspended_seconds=suspended_seconds, cause=cause, hold=hold),
+        "sleep",
+        current.wake_at if advanced else None,
+    )
 
 
 def _wifi_is_down(note: str | None) -> bool:
     return bool(note) and "still down" in note
 
 
-def _closed_lid_summary(current: MonitorSnapshot) -> str:
+def _closed_lid_summary(current: MonitorSnapshot, *, hold: bool) -> str:
     """One line for a lid close or a closed-lid decision change.
 
     The display clause is omitted when this poll could not read displays.
     No agents is the sleep path. Busy agents name the hold and the Wi-Fi
     result. ``Wi-Fi still down`` keeps the explicit "not finished" so a
     dead radio is not reported as the agent ending.
+
+    ``hold`` is the hold already confirmed. A hold this poll still has to
+    take is omitted here; the acquire step prints ``hold on`` after it is set.
     """
     parts = ["lid closed"]
     if current.external_display is True:
@@ -1462,8 +1618,10 @@ def _closed_lid_summary(current: MonitorSnapshot) -> str:
     count = len(current.agents)
     noun = "local agent" if count == 1 else "local agents"
     parts.append(f"{count} {noun} busy")
-    if current.want_hold:
+    if current.want_hold and hold:
         parts.append("sleep hold on")
+    elif current.want_hold:
+        pass
     elif current.block_reason:
         parts.append(f"sleep hold off ({current.block_reason})")
     else:
@@ -1490,23 +1648,30 @@ def _plan_quiet_status_events(
     next poll. A failed acquire or release is printed by the daemon itself.
 
     Flow:
-    1. Sleep, then wake, when a cycle is worth reporting. Same rules as the
-       verbose log. The first poll is a baseline.
+    1. One sleep summary when the power log, or a real new wake, is worth
+       reporting. The first poll is a baseline. A closed-lid acquire is not
+       quiet: the summary does not claim the hold until it is set.
     2. Lid open: quiet acquire or release only. After a closed lid, one
        ``lid opened`` line. A detection warning still prints.
     3. Lid just closed, the busy/idle hold flipped, or Wi-Fi crossed between
        up and still-down: one summary. Agent names follow only while someone
-       is busy. Acquire is quiet because the summary already says the hold
-       is on. Release is loud so the backend restore note is visible.
+       is busy. Release is loud so the backend restore note is visible.
     """
     steps: list[StatusStep] = []
-    home_path = str(Path.home()) if home is None else home
+    home_path = str(real_home()) if home is None else home
 
     def log(text: str, event: str | None = None, event_at: float | None = None) -> None:
         steps.append(StatusStep("log", text, event=event, event_at=event_at))
 
-    if _sleep_cycle_changed(previous, current) and _report_sleep_cycle(current, hold=hold, verbose=False):
-        _log_sleep_wake(log, current, suspended_seconds=suspended_seconds, hold=hold)
+    if current.power_cycles or _sleep_cycle_changed(previous, current):
+        _log_power_gap(
+            log,
+            previous,
+            current,
+            suspended_seconds=suspended_seconds,
+            hold=hold,
+            verbose=False,
+        )
 
     if current.warning and (previous is None or previous.warning != current.warning):
         log(f"detection warning: {current.warning}")
@@ -1557,13 +1722,15 @@ def _plan_quiet_status_events(
     decision_changed = just_closed or was_busy != now_busy or wifi_crossed or (hold and not current.want_hold)
     if decision_changed:
         if just_closed or now_busy or wifi_crossed or (current.agents and not current.want_hold):
-            log(_closed_lid_summary(current), event="lid" if just_closed else None)
+            log(_closed_lid_summary(current, hold=hold), event="lid" if just_closed else None)
             if current.agents:
                 for agent in current.agents:
                     log(f"  {format_agent(agent, home=home_path)}")
         elif hold and not current.want_hold:
             log("local agents idle; releasing sleep hold")
-    hold_steps(quiet_acquire=True)
+    # The summary omits "sleep hold on" until the hold is already set.
+    # A closed lid that still needs it prints "hold on" after acquire.
+    hold_steps(quiet_acquire=not (not hold and current.want_hold))
     return steps
 
 
@@ -1624,10 +1791,10 @@ def _plan_verbose_status_events(
     When the last busy agent finishes while the hold is on, the plan order is
     ``agent finished``, then ``all local agents idle; releasing sleep hold``,
     then a ``release`` step. The daemon restores sleep and only then prints
-    ``sleep hold released``.
+    ``hold off``.
     """
     steps: list[StatusStep] = []
-    home_path = str(Path.home()) if home is None else home
+    home_path = str(real_home()) if home is None else home
 
     def log(text: str, event: str | None = None, event_at: float | None = None) -> None:
         steps.append(StatusStep("log", text, event=event, event_at=event_at))
@@ -1635,13 +1802,20 @@ def _plan_verbose_status_events(
     prev_agents = {} if previous is None else {agent.key: agent for agent in previous.agents}
     curr_agents = {agent.key: agent for agent in current.agents}
 
-    # The process is frozen during real system sleep, so both lines appear
-    # on the poll after wake. Sleep, then wake, then a lid change.
-    if _sleep_cycle_changed(previous, current) and _report_sleep_cycle(current, hold=hold, verbose=verbose):
-        _log_sleep_wake(log, current, suspended_seconds=suspended_seconds, hold=hold)
+    # The process is frozen during real system sleep, so the summary appears
+    # on the poll after wake, before a lid change.
+    if current.power_cycles or _sleep_cycle_changed(previous, current):
+        _log_power_gap(
+            log,
+            previous,
+            current,
+            suspended_seconds=suspended_seconds,
+            hold=hold,
+            verbose=verbose,
+        )
 
     if previous is None or previous.lid != current.lid:
-        log(_lid_line(current), event="lid")
+        log(_lid_line(current, hold=hold), event="lid")
 
     if current.warning and (previous is None or previous.warning != current.warning):
         log(f"detection warning: {current.warning}")

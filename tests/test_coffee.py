@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import pwd
 import re
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -918,7 +921,18 @@ class HoldAndStatusTests(unittest.TestCase):
         self.assertFalse(any(step.event in {"sleep", "wake"} for step in first))
 
         wake_at = 1_700_000_600.0
-        awake = self._cycle(lid="open", sleep_wake_id="cycle-b", wake_at=wake_at)
+        start_at = wake_at - 600
+        cycles = (
+            coffee_activity.PowerLogEvent("sleep", start_at, "Clamshell Sleep"),
+            coffee_activity.PowerLogEvent("wake", wake_at, "lid"),
+        )
+        awake = self._cycle(
+            lid="open",
+            sleep_wake_id="cycle-b",
+            wake_at=wake_at,
+            power_cycles=cycles,
+            power_log_read=True,
+        )
         steps = coffee_activity.plan_status_events(
             asleep,
             awake,
@@ -926,21 +940,16 @@ class HoldAndStatusTests(unittest.TestCase):
             suspended_seconds=600,
             home=HOME,
         )
-        self.assertEqual([step.event for step in steps[:3]], ["sleep", "wake", "lid"])
-        start = datetime.fromtimestamp(wake_at - 600).strftime("%H:%M:%S")
+        start = datetime.fromtimestamp(start_at).strftime("%H:%M:%S")
         woke = datetime.fromtimestamp(wake_at).strftime("%H:%M:%S")
-        self.assertEqual(
-            steps[0].text,
-            f"system sleep started about {start} (Clamshell Sleep, asleep ~10m)",
-        )
-        self.assertEqual(steps[0].event_at, wake_at - 600)
-        self.assertEqual(steps[1].text, f"woke at {woke} (lid)")
-        self.assertEqual(steps[1].event_at, wake_at)
-        self.assertEqual(steps[2].text, "lid opened")
+        self.assertEqual([step.event for step in steps], ["sleep", "lid"])
+        self.assertEqual(steps[0].text, f"asleep {start}–{woke} · 10m · 1 sleep · last wake lid")
+        self.assertEqual(steps[0].event_at, start_at)
+        self.assertEqual(steps[1].text, "lid opened")
 
         held = coffee_activity.plan_status_events(asleep, awake, hold=True, suspended_seconds=600)
-        self.assertIn("while the sleep hold was on", held[0].text)
-        self.assertTrue(held[1].text.startswith("woke at "))
+        self.assertIn("hold was on", held[0].text)
+        self.assertEqual(held[0].event, "sleep")
 
     def test_same_sleep_cycle_stays_quiet_even_if_the_wait_was_long(self) -> None:
         snap = self._cycle()
@@ -988,8 +997,8 @@ class HoldAndStatusTests(unittest.TestCase):
             verbose=True,
             suspended_seconds=30,
         )
-        self.assertTrue(any(step.text.startswith("system sleep started") for step in noisy))
-        self.assertTrue(any(step.text.startswith("maintenance wake at ") for step in noisy))
+        self.assertTrue(any(step.text.startswith("unavailable for about 30s") for step in noisy))
+        self.assertTrue(any("last wake maintenance" in step.text for step in noisy))
         failed = coffee_activity.plan_status_events(
             before,
             after,
@@ -997,16 +1006,17 @@ class HoldAndStatusTests(unittest.TestCase):
             verbose=False,
             suspended_seconds=30,
         )
-        self.assertTrue(any("while the sleep hold was on" in step.text for step in failed))
-        self.assertTrue(any(step.text.startswith("maintenance wake at ") for step in failed))
+        self.assertTrue(any("hold was on" in step.text for step in failed))
+        self.assertTrue(any(step.text.startswith("unavailable for about 30s") for step in failed))
 
     def test_short_freeze_skips_the_estimated_sleep_start(self) -> None:
         before = self._cycle(sleep_wake_id="cycle-a", wake_at=1_700_000_000.0)
         after = self._cycle(sleep_wake_id="cycle-b", wake_at=1_700_000_010.0)
         steps = coffee_activity.plan_status_events(before, after, hold=False, suspended_seconds=2)
-        self.assertEqual(steps[0].text, "system sleep started (Clamshell Sleep)")
-        self.assertIsNone(steps[0].event_at)
-        self.assertTrue(steps[1].text.startswith("woke at "))
+        self.assertEqual(steps[0].text, "unavailable · last wake lid")
+        self.assertEqual(steps[0].event, "sleep")
+        self.assertEqual(steps[0].event_at, 1_700_000_010.0)
+        self.assertFalse(any(step.event == "wake" for step in steps))
 
     def test_lid_closed_says_whether_the_hold_keeps_the_mac_awake(self) -> None:
         held = coffee_activity.plan_status_events(
@@ -1081,7 +1091,18 @@ class HoldAndStatusTests(unittest.TestCase):
         self.assertFalse(any(step.event in {"sleep", "wake"} for step in first))
 
         wake_at = 1_700_000_600.0
-        awake = self._cycle(lid="open", sleep_wake_id="cycle-b", wake_at=wake_at)
+        start_at = wake_at - 600
+        cycles = (
+            coffee_activity.PowerLogEvent("sleep", start_at, "Clamshell Sleep"),
+            coffee_activity.PowerLogEvent("wake", wake_at, "lid"),
+        )
+        awake = self._cycle(
+            lid="open",
+            sleep_wake_id="cycle-b",
+            wake_at=wake_at,
+            power_cycles=cycles,
+            power_log_read=True,
+        )
         steps = coffee_activity.plan_status_events(
             asleep,
             awake,
@@ -1089,21 +1110,16 @@ class HoldAndStatusTests(unittest.TestCase):
             suspended_seconds=600,
             home=HOME,
         )
-        self.assertEqual([step.event for step in steps[:3]], ["sleep", "wake", "lid"])
-        start = datetime.fromtimestamp(wake_at - 600).strftime("%H:%M:%S")
+        start = datetime.fromtimestamp(start_at).strftime("%H:%M:%S")
         woke = datetime.fromtimestamp(wake_at).strftime("%H:%M:%S")
-        self.assertEqual(
-            steps[0].text,
-            f"system sleep started about {start} (Clamshell Sleep, asleep ~10m)",
-        )
-        self.assertEqual(steps[0].event_at, wake_at - 600)
-        self.assertEqual(steps[1].text, f"woke at {woke} (lid)")
-        self.assertEqual(steps[1].event_at, wake_at)
-        self.assertEqual(steps[2].text, "lid opened")
+        self.assertEqual([step.event for step in steps], ["sleep", "lid"])
+        self.assertEqual(steps[0].text, f"asleep {start}–{woke} · 10m · 1 sleep · last wake lid")
+        self.assertEqual(steps[0].event_at, start_at)
+        self.assertEqual(steps[1].text, "lid opened")
 
         held = coffee_activity.plan_status_events(asleep, awake, hold=True, suspended_seconds=600)
-        self.assertIn("while the sleep hold was on", held[0].text)
-        self.assertTrue(held[1].text.startswith("woke at "))
+        self.assertIn("hold was on", held[0].text)
+        self.assertEqual(held[0].event, "sleep")
 
     def test_same_sleep_cycle_stays_quiet_even_if_the_wait_was_long(self) -> None:
         snap = self._cycle()
@@ -1151,8 +1167,8 @@ class HoldAndStatusTests(unittest.TestCase):
             verbose=True,
             suspended_seconds=30,
         )
-        self.assertTrue(any(step.text.startswith("system sleep started") for step in noisy))
-        self.assertTrue(any(step.text.startswith("maintenance wake at ") for step in noisy))
+        self.assertTrue(any(step.text.startswith("unavailable for about 30s") for step in noisy))
+        self.assertTrue(any("last wake maintenance" in step.text for step in noisy))
         failed = coffee_activity.plan_status_events(
             before,
             after,
@@ -1160,16 +1176,17 @@ class HoldAndStatusTests(unittest.TestCase):
             verbose=False,
             suspended_seconds=30,
         )
-        self.assertTrue(any("while the sleep hold was on" in step.text for step in failed))
-        self.assertTrue(any(step.text.startswith("maintenance wake at ") for step in failed))
+        self.assertTrue(any("hold was on" in step.text for step in failed))
+        self.assertTrue(any(step.text.startswith("unavailable for about 30s") for step in failed))
 
     def test_short_freeze_skips_the_estimated_sleep_start(self) -> None:
         before = self._cycle(sleep_wake_id="cycle-a", wake_at=1_700_000_000.0)
         after = self._cycle(sleep_wake_id="cycle-b", wake_at=1_700_000_010.0)
         steps = coffee_activity.plan_status_events(before, after, hold=False, suspended_seconds=2)
-        self.assertEqual(steps[0].text, "system sleep started (Clamshell Sleep)")
-        self.assertIsNone(steps[0].event_at)
-        self.assertTrue(steps[1].text.startswith("woke at "))
+        self.assertEqual(steps[0].text, "unavailable · last wake lid")
+        self.assertEqual(steps[0].event, "sleep")
+        self.assertEqual(steps[0].event_at, 1_700_000_010.0)
+        self.assertFalse(any(step.event == "wake" for step in steps))
 
     def test_lid_closed_says_whether_the_hold_keeps_the_mac_awake(self) -> None:
         held = coffee_activity.plan_status_events(
@@ -1278,12 +1295,12 @@ class HoldAndStatusTests(unittest.TestCase):
             [
                 "agent finished: Fix cache (id abc)",
                 "all local agents idle; releasing sleep hold",
-                "sleep hold released (fake-release)",
+                "hold off (fake-release)",
             ],
         )
         self.assertEqual(backend.calls, ["release"])
         self.assertFalse(controller.held)
-        self.assertEqual(coffee.release_line(""), "sleep hold released")
+        self.assertEqual(coffee.release_line(""), "hold off")
 
     def test_quiet_acquire_does_not_print_the_success_line(self) -> None:
         class FakeBackend:
@@ -1331,7 +1348,7 @@ class HoldAndStatusTests(unittest.TestCase):
             with patch("tools.coffee.info", side_effect=lines.append):
                 coffee._print_saved_state(state, running=True)
                 coffee._print_saved_state(state, running=False)
-        stamp = datetime.fromtimestamp(1_700_000_100).strftime("%H:%M:%S")
+        stamp = datetime.fromtimestamp(1_700_000_100).strftime("%Y-%m-%d %H:%M:%S")
         self.assertIn(f"lid event: lid opened ({stamp})", lines)
         self.assertIn(
             "sleep event: system sleep started about 07:31:00 (Clamshell Sleep, asleep ~10m)",
@@ -1393,7 +1410,7 @@ class HoldAndStatusTests(unittest.TestCase):
             with patch("tools.coffee.info", side_effect=lines.append):
                 coffee._print_saved_state(state, running=True)
                 coffee._print_saved_state(state, running=False)
-        stamp = datetime.fromtimestamp(1_700_000_100).strftime("%H:%M:%S")
+        stamp = datetime.fromtimestamp(1_700_000_100).strftime("%Y-%m-%d %H:%M:%S")
         self.assertIn(f"lid event: lid opened ({stamp})", lines)
         self.assertIn(
             "sleep event: system sleep started about 07:31:00 (Clamshell Sleep, asleep ~10m)",
@@ -1428,6 +1445,163 @@ class HoldAndStatusTests(unittest.TestCase):
         self.assertEqual(loaded["sleep"]["at"], 10.0)
         self.assertEqual(loaded["wake"]["text"], "woke at 07:41:21 (lid)")
 
+    def test_stale_wake_time_is_not_printed(self) -> None:
+        before = self._cycle(sleep_wake_id="cycle-a", wake_at=1_700_000_600.0)
+        after = self._cycle(sleep_wake_id="cycle-b", wake_at=1_700_000_000.0, power_log_read=True)
+        steps = coffee_activity.plan_status_events(before, after, hold=False, suspended_seconds=2)
+        self.assertFalse(any(step.event in {"sleep", "wake"} for step in steps))
+
+    def test_power_log_counts_every_cycle_in_one_freeze(self) -> None:
+        start = 1_700_000_000.0
+        cycles = (
+            coffee_activity.PowerLogEvent("sleep", start, "Idle Sleep"),
+            coffee_activity.PowerLogEvent("darkwake", start + 70, "maintenance"),
+            coffee_activity.PowerLogEvent("sleep", start + 100, "Maintenance Sleep"),
+            coffee_activity.PowerLogEvent("darkwake", start + 200, "maintenance"),
+            coffee_activity.PowerLogEvent("sleep", start + 230, "Maintenance Sleep"),
+            coffee_activity.PowerLogEvent("wake", start + 550, "power button"),
+        )
+        before = self._cycle(sleep_wake_id="cycle-a", wake_at=start - 10)
+        after = self._cycle(
+            lid="open",
+            sleep_wake_id="cycle-b",
+            wake_at=start + 550,
+            power_cycles=cycles,
+            power_log_read=True,
+        )
+        steps = coffee_activity.plan_status_events(before, after, hold=False, suspended_seconds=550)
+        self.assertEqual(steps[0].event, "sleep")
+        self.assertIn("3 sleeps, 2 dark wakes", steps[0].text)
+        self.assertIn("last wake power button", steps[0].text)
+        self.assertNotIn("system sleep started", steps[0].text)
+        self.assertFalse(any(step.event == "wake" for step in steps))
+
+        listed = coffee_activity.plan_status_events(
+            before,
+            after,
+            hold=True,
+            verbose=True,
+            suspended_seconds=550,
+        )
+        texts = [step.text for step in listed]
+        self.assertEqual(sum(text.startswith("sleep ") for text in texts), 3)
+        self.assertEqual(sum(text.startswith("dark wake ") for text in texts), 2)
+        self.assertTrue(any(text.startswith("asleep ") and "hold was on" in text for text in texts))
+
+    def test_dark_wakes_alone_stay_quiet_unless_the_hold_failed(self) -> None:
+        start = 1_700_000_000.0
+        cycles = (
+            coffee_activity.PowerLogEvent("sleep", start, "Maintenance Sleep"),
+            coffee_activity.PowerLogEvent("darkwake", start + 20, "maintenance"),
+        )
+        before = self._cycle(user_wake=False, sleep_wake_id="cycle-a", wake_at=start - 30)
+        after = self._cycle(
+            user_wake=False,
+            wake_reason="Maintenance",
+            sleep_wake_id="cycle-b",
+            wake_at=start + 20,
+            power_cycles=cycles,
+            power_log_read=True,
+        )
+        quiet = coffee_activity.plan_status_events(before, after, hold=False, verbose=False)
+        self.assertFalse(any(step.event == "sleep" for step in quiet))
+        failed = coffee_activity.plan_status_events(before, after, hold=True, verbose=False)
+        self.assertTrue(any("hold was on" in step.text and "1 dark wake" in step.text for step in failed))
+
+    def test_closed_lid_does_not_claim_the_hold_before_it_is_set(self) -> None:
+        closed = _snap(
+            lid="closed",
+            agents=(_agent(),),
+            phase=coffee_activity.AgentPhase.BUSY,
+            want_hold=True,
+            external_display=False,
+            wifi_note="Wi-Fi on",
+        )
+        steps = coffee_activity.plan_status_events(_snap(lid="open"), closed, hold=False, home=HOME)
+        texts = [step.text for step in steps if step.kind == "log"]
+        self.assertTrue(any("1 local agent busy" in text for text in texts))
+        self.assertFalse(any("sleep hold on" in text or text == "hold on" for text in texts))
+        acquire = [step for step in steps if step.kind == "acquire"]
+        self.assertEqual(len(acquire), 1)
+        self.assertFalse(acquire[0].quiet)
+
+    def test_pmset_log_parser_keeps_only_the_gap(self) -> None:
+        sample = "\n".join(
+            [
+                "2026-11-07 23:21:00 +0800 Wake                 Wake from Deep Idle : due to lid",
+                "2026-11-07 23:23:54 +0800 Sleep                Entering Sleep state due to 'Idle Sleep':",
+                "2026-11-07 23:25:10 +0800 DarkWake             DarkWake from Deep Idle : due to RTC/Maintenance",
+                "2026-11-07 23:25:40 +0800 Sleep                Entering Sleep state due to 'Maintenance Sleep':",
+                "2026-11-07 23:28:00 +0800 DarkWake             DarkWake from Deep Idle : due to RTC",
+                "2026-11-07 23:28:20 +0800 Sleep                Entering Sleep state due to 'Maintenance Sleep':",
+                "2026-11-07 23:33:04 +0800 Wake                 Wake from Deep Idle : due to smc pwrbtn SMC.OutboxNotEmpty",
+            ]
+        )
+        start = datetime.strptime("2026-11-07 23:22:00 +0800", "%Y-%m-%d %H:%M:%S %z").timestamp()
+        end = datetime.strptime("2026-11-07 23:33:04 +0800", "%Y-%m-%d %H:%M:%S %z").timestamp()
+        cycles = coffee_activity.parse_pmset_log(sample, start=start, end=end)
+        self.assertEqual([item.kind for item in cycles], ["sleep", "darkwake", "sleep", "darkwake", "sleep", "wake"])
+        self.assertEqual(cycles[0].reason, "Idle Sleep")
+        self.assertEqual(cycles[-1].reason, "power button")
+        text = coffee_activity.format_power_summary(cycles, hold=False)
+        self.assertIn("3 sleeps, 2 dark wakes", text)
+        self.assertIn("last wake power button", text)
+        self.assertNotIn("23:21:00", text)
+
+    def test_startup_lines_stay_short_until_the_password(self) -> None:
+        missing = coffee_awake.assess_amphetamine(
+            force_pmset=False,
+            installed=False,
+            usable=False,
+            closed_display_sleep_allowed=None,
+        )
+        config = coffee.CoffeeConfig(
+            idle_seconds=120,
+            poll_seconds=20,
+            force_pmset=False,
+            allow_battery=True,
+            dry_run=False,
+            background=False,
+            verbose=False,
+        )
+        with patch.object(coffee.os, "geteuid", return_value=501):
+            lines = coffee.startup_lines(config, "pmset", missing)
+        self.assertEqual(
+            lines,
+            (
+                "coffee · pmset · idle 120s · poll 20s",
+                "Amphetamine is not installed. Password once for this run.",
+            ),
+        )
+        ready = coffee_awake.assess_amphetamine(
+            force_pmset=False,
+            installed=True,
+            usable=True,
+            closed_display_sleep_allowed=False,
+        )
+        self.assertEqual(
+            coffee.startup_lines(config, "amphetamine", ready),
+            ("coffee · amphetamine · idle 120s · poll 20s",),
+        )
+        dry = coffee.CoffeeConfig(
+            idle_seconds=120,
+            poll_seconds=20,
+            force_pmset=True,
+            allow_battery=True,
+            dry_run=True,
+            background=False,
+            verbose=False,
+        )
+        self.assertIn("dry-run", coffee.startup_lines(dry, "pmset", missing)[1])
+
+    def test_paint_colors_keywords_only_when_asked(self) -> None:
+        plain = "lid closed; sleep hold on; Wi-Fi still down; hold was on"
+        self.assertEqual(coffee.paint(plain, enabled=False), plain)
+        colored = coffee.paint(plain, enabled=True)
+        self.assertIn("lid closed", _plain(colored))
+        self.assertNotEqual(colored, plain)
+        self.assertIn("\x1b[", colored)
+
     def test_amphetamine_session_failure_announces_the_pmset_switch(self) -> None:
         class AmpFail:
             name = "amphetamine"
@@ -1461,10 +1635,10 @@ class HoldAndStatusTests(unittest.TestCase):
         self.assertIn("not usable", text)
         self.assertIn("Allow system sleep when display is closed", text)
         self.assertIn("Using pmset instead", text)
-        self.assertIn("hold acquired (sudo pmset -a disablesleep 1)", text)
+        self.assertIn("hold on (sudo pmset -a disablesleep 1)", text)
         self.assertLess(
             text.index("Using pmset instead"),
-            text.index("hold acquired"),
+            text.index("hold on"),
         )
         self.assertEqual(controller.amphetamine_state, "not-usable")
         self.assertIn("using pmset instead", controller.backend_reason)
@@ -1796,12 +1970,74 @@ class AwakeBackendTests(unittest.TestCase):
             calls.append(list(argv))
             if argv == ["pmset", "-g"]:
                 return coffee_awake.CommandResult(0, f"disablesleep {value['sleep']}\n", "")
-            if argv and argv[0] == "sudo" and "disablesleep" in argv:
+            if "disablesleep" in argv and "-a" in argv:
                 value["sleep"] = argv[-1]
                 return coffee_awake.CommandResult(0, "", "")
             return coffee_awake.CommandResult(0, "", "")
 
         return run, calls
+
+    def test_real_home_follows_sudo_uid_only_when_root(self) -> None:
+        expected = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        with (
+            patch.object(coffee_awake.os, "geteuid", return_value=0),
+            patch.dict(os.environ, {"SUDO_UID": str(os.getuid())}),
+        ):
+            self.assertEqual(coffee_awake.real_home(), expected)
+        with (
+            patch.object(coffee_awake.os, "geteuid", return_value=os.getuid()),
+            patch.dict(os.environ, {"SUDO_UID": "0"}),
+        ):
+            self.assertEqual(coffee_awake.real_home(), Path.home())
+
+    def test_pmset_helper_sets_disablesleep_without_sudo(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            value = {"sleep": "0"}
+            run, calls = self._runner(value)
+            alive = {"on": True}
+
+            def pid_alive_fn(_pid: int) -> bool:
+                return alive["on"]
+
+            thread = threading.Thread(
+                target=coffee_awake.serve_pmset_helper,
+                kwargs={
+                    "state_dir": state_dir,
+                    "watch_pid": os.getpid(),
+                    "run": run,
+                    "pid_alive_fn": pid_alive_fn,
+                    "poll_seconds": 0.05,
+                },
+                daemon=True,
+            )
+            thread.start()
+            sock = state_dir / "pmset.sock"
+            client = coffee_awake.PmsetHelperClient(sock)
+            taken = None
+            deadline = time.time() + 3
+            while time.time() < deadline:
+                if sock.exists():
+                    try:
+                        taken = client.acquire()
+                    except coffee_awake.CommandError:
+                        taken = None
+                        time.sleep(0.05)
+                        continue
+                    break
+                time.sleep(0.02)
+            self.assertIsNotNone(taken)
+            assert taken is not None
+            self.assertTrue(taken.owns)
+            self.assertIn("pmset disablesleep 1", taken.note)
+            self.assertTrue(any(argv[:4] == ["/usr/bin/pmset", "-a", "disablesleep", "1"] for argv in calls))
+            self.assertFalse(any(argv and argv[0] == "sudo" for argv in calls))
+            restored = client.release()
+            self.assertIn("pmset disablesleep 0", restored.note)
+            self.assertFalse((state_dir / "hold.lock").exists())
+            client.quit()
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
 
     def test_pmset_acquire_restores_and_does_not_steal_an_existing_setting(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

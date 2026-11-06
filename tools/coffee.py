@@ -8,16 +8,18 @@ and again on exit.
 Amphetamine is preferred when it is installed and Session Defaults already
 disallow system sleep with the display closed. coffee cannot change that
 checkbox. If Amphetamine is missing, not usable, or not configured for a
-closed lid, coffee prints the setup steps and uses ``sudo pmset -a
-disablesleep 1`` instead, and says so in the log. ``--pmset`` selects that
-path up front. The previous ``disablesleep`` value is restored on exit,
-on SIGINT/SIGTERM, and if this process dies.
+closed lid, coffee says so in two short lines and uses ``pmset disablesleep``
+instead. ``--pmset`` selects that path up front. The password is asked once
+per run; a root helper keeps the privilege across sleep. The previous
+``disablesleep`` value is restored on exit, on SIGINT/SIGTERM, and if this
+process dies. ``sudo lf coffee`` does not ask a second time, and still reads
+the invoking user's Cursor files.
 
 The foreground process stays quiet while the lid is open. It prints one
-summary when the lid closes (clamshell or not, how many agents, whether
-Wi-Fi is up) and when that closed-lid decision changes. System sleep and a
-user wake are separate lines, printed after the Mac wakes. ``--verbose``
-prints every agent and hold change. Releasing the hold is not system sleep.
+summary when the lid closes and when that decision changes. After the Mac
+wakes, one line summarizes the real sleep and wake cycles from ``pmset -g
+log``. ``--verbose`` prints every cycle, agent, and hold change. Releasing
+the hold is not system sleep.
 """
 
 from __future__ import annotations
@@ -125,7 +127,53 @@ class HoldController:
 
 
 def coffee_state_dir() -> Path:
-    return Path.home() / ".config" / "lf-toolbox" / "coffee"
+    return awake.real_home() / ".config" / "lf-toolbox" / "coffee"
+
+
+_STAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+# Longer phrases first so "Wi-Fi still down" is not partly colored as "Wi-Fi on".
+_PAINT_PHRASES: tuple[tuple[str, str], ...] = (
+    ("Wi-Fi still down", typer.colors.RED),
+    ("hold was on", typer.colors.RED),
+    ("lid closed", typer.colors.YELLOW),
+    ("sleep hold off", typer.colors.YELLOW),
+    ("lid opened", typer.colors.GREEN),
+    ("lid open", typer.colors.GREEN),
+    ("hold off", typer.colors.YELLOW),
+    ("hold on", typer.colors.GREEN),
+    ("Wi-Fi on", typer.colors.GREEN),
+)
+
+
+def paint(text: str, *, enabled: bool | None = None) -> str:
+    """Color the few words that change what a coffee line means.
+
+    Stored status text stays plain. Color is only for a terminal, and
+    ``NO_COLOR`` turns it off.
+    """
+    if enabled is None:
+        enabled = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+    if not enabled or not text:
+        return text
+    pieces: list[tuple[str, str | None]] = [(text, None)]
+    for phrase, color in _PAINT_PHRASES:
+        next_pieces: list[tuple[str, str | None]] = []
+        for chunk, existing in pieces:
+            if existing is not None or phrase not in chunk:
+                next_pieces.append((chunk, existing))
+                continue
+            parts = chunk.split(phrase)
+            for index, part in enumerate(parts):
+                if part:
+                    next_pieces.append((part, None))
+                if index != len(parts) - 1:
+                    next_pieces.append((phrase, color))
+        pieces = next_pieces
+    return "".join(chunk if color is None else typer.style(chunk, fg=color) for chunk, color in pieces)
+
+
+def _say(text: str) -> None:
+    info(paint(text))
 
 
 def require_macos() -> None:
@@ -139,9 +187,13 @@ def require_macos() -> None:
 
 
 def emit(text: str, *, now: datetime | None = None) -> None:
-    """Print one timestamped status line. Callers should not print every poll."""
-    stamp = (now or datetime.now()).strftime("%H:%M:%S")
-    info(f"{stamp}  {text}")
+    """Print one dated status line. Callers should not print every poll.
+
+    The stored event text is the plain ``text``. Color is applied only to
+    the line written to the terminal.
+    """
+    stamp = (now or datetime.now()).strftime(_STAMP_FORMAT)
+    _say(f"{stamp}  {text}")
 
 
 def release_line(note: str) -> str:
@@ -152,8 +204,8 @@ def release_line(note: str) -> str:
     """
     cleaned = " ".join(note.split())
     if cleaned:
-        return f"sleep hold released ({cleaned})"
-    return "sleep hold released"
+        return f"hold off ({cleaned})"
+    return "hold off"
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -166,9 +218,11 @@ def _read_json(path: Path) -> dict[str, Any] | None:
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    awake.chown_invoker(path.parent)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, path)
+    awake.chown_invoker(path)
 
 
 def _ensure_single_instance(state_dir: Path) -> None:
@@ -176,7 +230,9 @@ def _ensure_single_instance(state_dir: Path) -> None:
     import fcntl
 
     global _LOCK_FD
-    fd = os.open(state_dir / "daemon.lock", os.O_CREAT | os.O_RDWR, 0o644)
+    lock_path = state_dir / "daemon.lock"
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    awake.chown_invoker(lock_path)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -320,6 +376,10 @@ def _remember_events(
             continue
         at = step.event_at if isinstance(step.event_at, (int, float)) else now
         events[step.event] = {"text": step.text, "at": at}
+        # The summary already names the wake. Drop a previous wake line so
+        # status does not show an older wake beside the new summary.
+        if step.event == "sleep" and step.text.startswith(("asleep ", "unavailable")):
+            events.pop("wake", None)
 
 
 def _format_saved_agent(payload: dict[str, Any]) -> str:
@@ -338,33 +398,33 @@ def _print_saved_state(state_dir: Path, *, running: bool) -> None:
     if not state:
         return
     prefix = "" if running else "last "
-    info(f"{prefix}backend: {state.get('backend', 'unknown')}")
+    _say(f"{prefix}backend: {state.get('backend', 'unknown')}")
     backend_reason = state.get("backend_reason")
     if isinstance(backend_reason, str) and backend_reason:
-        info(f"{prefix}backend detail: {backend_reason}")
+        _say(f"{prefix}backend detail: {backend_reason}")
     amphetamine_state = state.get("amphetamine")
     if isinstance(amphetamine_state, str) and amphetamine_state:
-        info(f"{prefix}amphetamine: {amphetamine_state}")
-    info(f"{prefix}hold: {'yes' if state.get('hold') else 'no'}")
+        _say(f"{prefix}amphetamine: {amphetamine_state}")
+    _say(f"{prefix}hold: {'yes' if state.get('hold') else 'no'}")
     lid = state.get("lid", "unknown")
     detail = state.get("lid_detail") or "best-effort"
-    info(f"{prefix}lid: {lid} ({detail})")
+    _say(f"{prefix}lid: {lid} ({detail})")
     _print_events(state, prefix=prefix)
-    info(f"{prefix}power: {state.get('power', 'unknown')}")
-    info(f"{prefix}agent: {state.get('phase', 'unknown')}")
+    _say(f"{prefix}power: {state.get('power', 'unknown')}")
+    _say(f"{prefix}agent: {state.get('phase', 'unknown')}")
     agents = state.get("agents")
     if isinstance(agents, list) and agents:
         for item in agents:
             if isinstance(item, dict):
-                info(f"  {_format_saved_agent(item)}")
+                _say(f"  {_format_saved_agent(item)}")
     else:
-        info("  none")
+        _say("  none")
     reason = state.get("reason")
     if isinstance(reason, str) and reason:
-        info(f"{prefix}reason: {reason}")
+        _say(f"{prefix}reason: {reason}")
     updated = state.get("updated_at")
     if isinstance(updated, (int, float)):
-        info(f"{prefix}updated: {datetime.fromtimestamp(updated).strftime('%H:%M:%S')}")
+        _say(f"{prefix}updated: {datetime.fromtimestamp(updated).strftime(_STAMP_FORMAT)}")
 
 
 def _print_events(state: dict[str, Any], *, prefix: str) -> None:
@@ -388,46 +448,138 @@ def _print_events(state: dict[str, Any], *, prefix: str) -> None:
             continue
         at = item.get("at")
         if key == "lid" and isinstance(at, (int, float)):
-            stamp = datetime.fromtimestamp(at).strftime("%H:%M:%S")
-            info(f"{prefix}{label}: {text} ({stamp})")
+            stamp = datetime.fromtimestamp(at).strftime(_STAMP_FORMAT)
+            _say(f"{prefix}{label}: {text} ({stamp})")
         else:
-            info(f"{prefix}{label}: {text}")
+            _say(f"{prefix}{label}: {text}")
 
 
-def _emit_banner(config: CoffeeConfig, backend_name: str, why: str) -> None:
-    emit("coffee: watching local Cursor agent work")
-    emit(f"backend: {backend_name} ({why})")
+def startup_lines(
+    config: CoffeeConfig,
+    backend_name: str,
+    readiness: awake.AmphetamineReadiness,
+) -> tuple[str, ...]:
+    """The lines printed before the password. Two at most.
+
+    Amphetamine's checkbox steps stay on ``lf coffee setup`` and
+    ``lf coffee status``. ``--verbose`` prints them after the password.
+    A child started with ``--background`` inherits the helper socket and
+    does not ask again.
+    """
+    head = f"coffee · {backend_name} · idle {config.idle_seconds}s · poll {config.poll_seconds}s"
     if config.dry_run:
-        emit("dry-run: detection only; sleep settings will not change")
-    elif backend_name == "amphetamine":
+        return (head, "dry-run: detection only; sleep settings will not change")
+    if backend_name != "pmset" or os.environ.get("LF_COFFEE_PMSET_SOCK") or os.geteuid() == 0:
+        return (head,)
+    second = {
+        "missing": "Amphetamine is not installed. Password once for this run.",
+        "not-configured": "Amphetamine is not ready for a closed lid. Password once for this run.",
+        "not-usable": "Amphetamine is not usable. Password once for this run.",
+    }.get(readiness.state, "Password once for this run.")
+    return (head, second)
+
+
+def _emit_details(config: CoffeeConfig, readiness: awake.AmphetamineReadiness) -> None:
+    """The longer setup and detection notes. ``--verbose`` only."""
+    for line in awake.amphetamine_fallback_lines(readiness, dry_run=config.dry_run):
+        emit(line)
+    if readiness.state == "ready":
         emit(
             "Using Amphetamine. The display may sleep. "
             "Session Defaults already disallow system sleep when the display is closed. "
             "coffee did not change that checkbox."
         )
-    else:
-        emit(
-            "pmset disablesleep keeps the Mac awake with the lid closed. "
-            "sudo may prompt once. coffee restores disablesleep on exit, "
-            "on SIGINT/SIGTERM, and if this process dies."
-        )
     emit(
         "detection is heuristic (local transcripts and composer status) and may need "
         f"--idle-seconds tuning. Cloud agents are ignored. "
-        f"Idle {config.idle_seconds}s, poll {config.poll_seconds}s. "
         "Lid state is best-effort. With the lid open the log stays quiet. "
         "A closed lid without an external display is not clamshell mode; "
         "coffee turns Wi-Fi back on if macOS powered the radio off. "
-        "System sleep and a user wake are printed on the next poll after the Mac wakes."
+        "System sleep is one summary on the next poll after the Mac wakes."
     )
 
 
-def _build_backend(name: str, state_dir: Path, *, dry_run: bool) -> Any:
+@dataclass
+class _PmsetAccess:
+    """How this run will change ``disablesleep``.
+
+    ``client`` is the root helper. ``direct`` means this process is already
+    root (``sudo lf coffee``). ``failed`` means the helper did not start, so
+    later acquires must not ask for the password again.
+    """
+
+    client: awake.PmsetHelperClient | None = None
+    direct: bool = False
+    failed: bool = False
+    opened: bool = False
+
+
+class _UnavailablePmset:
+    """A pmset backend that refuses without prompting."""
+
+    name = "pmset"
+    owns_setting = False
+
+    def acquire(self) -> str:
+        raise awake.CommandError(["pmset"], 1, "hold was not taken")
+
+    def release(self) -> str:
+        return "hold was not taken"
+
+    def keep_warm(self) -> bool:
+        return True
+
+
+def _open_pmset(state_dir: Path, access: _PmsetAccess, *, announced: bool) -> None:
+    """Ask for the password once, then start the root helper.
+
+    Already-root and a child that inherited the helper socket skip the prompt.
+    A cancelled password stops coffee. A helper that exits after the password
+    is one line, and later holds are not taken.
+    """
+    if access.opened:
+        return
+    access.opened = True
+    if os.geteuid() == 0:
+        access.direct = True
+        return
+    sock = os.environ.get("LF_COFFEE_PMSET_SOCK")
+    if sock:
+        access.client = awake.PmsetHelperClient(Path(sock))
+        return
+    if not announced:
+        emit("Password once for this run.")
+    try:
+        awake.default_run(["sudo", "-v"], interactive=True, timeout=180)
+    except awake.CommandError as exc:
+        fatal(f"hold was not taken: {exc}")
+    try:
+        access.client = awake.start_pmset_helper(state_dir, os.getpid())
+    except awake.CommandError as exc:
+        access.failed = True
+        emit(f"hold was not taken: {exc}")
+        return
+    os.environ["LF_COFFEE_PMSET_SOCK"] = str(access.client.sock_path)
+
+
+def _pmset_backend(state_dir: Path, access: _PmsetAccess) -> Any:
+    if access.failed:
+        return _UnavailablePmset()
+    return awake.PmsetBackend(state_dir, client=access.client)
+
+
+def _build_backend(
+    name: str,
+    state_dir: Path,
+    *,
+    dry_run: bool,
+    access: _PmsetAccess | None = None,
+) -> Any:
     if dry_run:
         return DryRunBackend(name)
     if name == "amphetamine":
         return awake.AmphetamineBackend(state_dir)
-    return awake.PmsetBackend(state_dir)
+    return _pmset_backend(state_dir, access or _PmsetAccess(direct=os.geteuid() == 0, opened=True))
 
 
 def _observe(config: CoffeeConfig) -> activity.MonitorSnapshot:
@@ -477,6 +629,32 @@ def _observe(config: CoffeeConfig) -> activity.MonitorSnapshot:
     )
 
 
+def _with_power_gap(
+    previous: activity.MonitorSnapshot | None,
+    snapshot: activity.MonitorSnapshot,
+    *,
+    suspended_seconds: float,
+    gap_start: float | None,
+) -> activity.MonitorSnapshot:
+    """Attach ``pmset -g log`` rows for the gap since the previous wait.
+
+    Read only after a freeze or a new sleep id. The first poll has no gap,
+    so a wake from before coffee started is not replayed.
+    """
+    if previous is None or gap_start is None:
+        return snapshot
+    changed = activity._sleep_cycle_changed(previous, snapshot)
+    if suspended_seconds < activity._MIN_SUSPEND_SECONDS and not changed:
+        return snapshot
+    end = time.time()
+    try:
+        raw = awake.read_pmset_log()
+    except awake.CommandError:
+        return replace(snapshot, power_cycles=(), power_log_read=False)
+    cycles = activity.parse_pmset_log(raw, start=gap_start, end=end)
+    return replace(snapshot, power_cycles=cycles, power_log_read=True)
+
+
 def _apply_steps(
     steps: list[activity.StatusStep],
     controller: HoldController,
@@ -486,9 +664,9 @@ def _apply_steps(
 ) -> None:
     """Print status lines and change the hold between them.
 
-    A ``release`` step is executed before ``sleep hold released`` so the
-    final line means the backend has already restored sleep (or reported why
-    it could not). That line is coffee's hold, not macOS entering system sleep.
+    A ``release`` step is executed before ``hold off`` so the final line
+    means the backend has already restored sleep (or reported why it could
+    not). That line is coffee's hold, not macOS entering system sleep.
     """
     for step in steps:
         if step.kind == "log":
@@ -501,26 +679,31 @@ def _apply_steps(
                 if getattr(controller.backend, "name", "") == "amphetamine":
                     # The session did not start. Say why, print the checkbox
                     # step, then take the pmset hold in this same poll so the
-                    # switch is in the log before "hold acquired".
+                    # switch is in the log before "hold on".
                     failed = awake.session_failed_readiness()
                     controller.backend_reason = f"{failed.reason} ({exc})"
                     controller.amphetamine_state = failed.state
                     for line in awake.amphetamine_fallback_lines(failed, dry_run=False):
                         emit(line)
                     emit(controller.backend_reason)
-                    controller.backend = awake.PmsetBackend(state_dir)
+                    access = getattr(controller, "pmset_access", None)
+                    if isinstance(access, _PmsetAccess):
+                        _open_pmset(state_dir, access, announced=False)
+                        controller.backend = _pmset_backend(state_dir, access)
+                    else:
+                        controller.backend = awake.PmsetBackend(state_dir)
                     try:
                         note = controller.acquire()
                     except awake.CommandError as pmset_error:
                         on_acquire_failure()
-                        emit(f"could not acquire sleep hold: {pmset_error}")
+                        emit(f"hold was not taken: {pmset_error}")
                         continue
                 else:
                     on_acquire_failure()
-                    emit(f"could not acquire sleep hold: {exc}")
+                    emit(f"hold was not taken: {exc}")
                     continue
             if not step.quiet:
-                emit(f"hold acquired ({note})")
+                emit(f"hold on ({note})" if note else "hold on")
             continue
         if step.kind == "release":
             try:
@@ -554,25 +737,30 @@ def _maintain(controller: HoldController, warned: dict[str, bool]) -> None:
             warned["sudo"] = True
 
 
-def _relaunch_in_background() -> None:
+def _relaunch_in_background() -> int:
+    """Detach coffee. The caller points the root helper at the child pid."""
     argv = [arg for arg in sys.argv if arg not in {"--background", "-b"}]
     state_dir = coffee_state_dir()
     state_dir.mkdir(parents=True, exist_ok=True)
+    awake.chown_invoker(state_dir)
     log_path = state_dir / "coffee.log"
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     handle = open(log_path, "a", encoding="utf-8", buffering=1)
-    proc = subprocess.Popen(
-        argv,
-        stdout=handle,
-        stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-        close_fds=True,
-        env=env,
-    )
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+            env=env,
+        )
+    finally:
+        handle.close()
     info(f"coffee started in the background (pid {proc.pid}). Log: {log_path}")
-    raise typer.Exit()
+    return proc.pid
 
 
 def _release_for_exit(controller: HoldController) -> None:
@@ -656,8 +844,8 @@ def serve(config: CoffeeConfig) -> None:
     including whether an external display makes this clamshell and whether
     Wi-Fi is up. While the lid stays closed, the next line is a hold change
     or Wi-Fi crossing to still-down. A real system sleep is printed later,
-    on the first poll after the Mac wakes. ``--verbose`` keeps the per-agent
-    lines.
+    on the first poll after the Mac wakes, as one summary of the power log.
+    ``--verbose`` keeps the per-agent lines and lists each sleep cycle.
 
     Observation errors do not immediately drop a hold that is already on.
     Three failed polls in a row release it, so a stuck reader cannot pin the
@@ -666,13 +854,20 @@ def serve(config: CoffeeConfig) -> None:
     require_macos()
     state_dir = coffee_state_dir()
     state_dir.mkdir(parents=True, exist_ok=True)
+    awake.chown_invoker(state_dir)
 
-    # Say which backend this run will use before detaching. A `--background`
-    # parent still has the terminal; the child repeats the same lines in the log.
-    # Amphetamine is used only when the closed-lid checkbox is already saved off.
+    # Two short lines, then the password, then anything longer. A background
+    # parent still has the terminal; the child repeats the short line in the
+    # log and reuses the helper socket instead of asking again.
     readiness = _current_readiness(force_pmset=config.force_pmset)
-    for line in awake.amphetamine_fallback_lines(readiness, dry_run=config.dry_run):
+    backend_name, why = awake.choose_backend(readiness)
+    for line in startup_lines(config, backend_name, readiness):
         emit(line)
+    access = _PmsetAccess()
+    if backend_name == "pmset" and not config.dry_run:
+        _open_pmset(state_dir, access, announced=True)
+    if config.verbose:
+        _emit_details(config, readiness)
     if readiness.state in {"missing", "not-configured", "not-usable"}:
         try:
             opened = _maybe_open_setup_helper(
@@ -687,24 +882,31 @@ def serve(config: CoffeeConfig) -> None:
         else:
             if opened:
                 emit(opened)
-    backend_name, why = awake.choose_backend(readiness)
-    _emit_banner(config, backend_name, why)
 
     if config.background:
-        _relaunch_in_background()
-        return
+        child_pid = _relaunch_in_background()
+        if access.client is not None:
+            try:
+                access.client.watch(child_pid)
+            except awake.CommandError as exc:
+                emit(f"hold was not taken: {exc}")
+        raise typer.Exit()
 
     _ensure_single_instance(state_dir)
 
-    restored = awake.recover_orphan_lock(state_dir)
-    if restored:
-        emit(restored)
+    # The helper already restored a dead owner's lock. A root process, or a
+    # run that has no helper, still clears one here.
+    if access.client is None:
+        restored = awake.recover_orphan_lock(state_dir, direct=os.geteuid() == 0)
+        if restored:
+            emit(restored)
 
     controller = HoldController(
-        _build_backend(backend_name, state_dir, dry_run=config.dry_run),
+        _build_backend(backend_name, state_dir, dry_run=config.dry_run, access=access),
         backend_reason=why,
         amphetamine_state=readiness.state,
     )
+    controller.pmset_access = access
 
     def _safety_release() -> None:
         if controller.held:
@@ -733,7 +935,10 @@ def serve(config: CoffeeConfig) -> None:
     # waited yet. Wall time jumps during system sleep and the monotonic
     # clock does not, so their difference is the suspend length. Measuring
     # only the wait keeps a slow Cursor read from looking like sleep.
+    # ``gap_start`` is the wall clock when that wait began. The power log
+    # is read for events after it, which is the gap this process was frozen.
     suspended_seconds = 0.0
+    gap_start: float | None = None
 
     def _note_acquire_failure() -> None:
         nonlocal acquire_retry_at
@@ -755,7 +960,7 @@ def serve(config: CoffeeConfig) -> None:
                     and previous is not None
                     and controller.held
                 ):
-                    snapshot = replace(previous, warning=warning)
+                    snapshot = replace(previous, warning=warning, power_cycles=None, power_log_read=False)
                 else:
                     # Keep the last sleep/wake identity. Clearing it would make
                     # the next good poll look like a baseline, and a real wake
@@ -783,6 +988,12 @@ def serve(config: CoffeeConfig) -> None:
                         )
                     snapshot = failed
 
+            snapshot = _with_power_gap(
+                previous,
+                snapshot,
+                suspended_seconds=suspended_seconds,
+                gap_start=gap_start,
+            )
             steps = activity.plan_status_events(
                 previous,
                 snapshot,
@@ -821,8 +1032,10 @@ def serve(config: CoffeeConfig) -> None:
             wait_mono = time.monotonic()
             time.sleep(config.poll_seconds)
             # System sleep advances wall time and pauses the monotonic clock.
-            # The difference is how long this wait was frozen, which the next
-            # poll uses to estimate when sleep started.
+            # The difference is how long this wait was frozen. The next poll
+            # reads the power log from ``wait_wall`` forward instead of
+            # treating that freeze as one sleep.
+            gap_start = wait_wall
             suspended_seconds = (time.time() - wait_wall) - (time.monotonic() - wait_mono)
             if suspended_seconds < 0:
                 suspended_seconds = 0.0
@@ -944,7 +1157,7 @@ def coffee(
     A closed lid without an external display is not clamshell mode; coffee
     turns Wi-Fi back on if macOS powered the radio off. Cloud agents do not
     keep the hold. A connection error is not treated as the agent finishing.
-    The Mac actually sleeping is a later line, printed after it wakes.
+    The Mac actually sleeping is one summary, printed after it wakes.
     Ctrl+C restores sleep settings before exiting.
     """
     if ctx.invoked_subcommand is not None:
