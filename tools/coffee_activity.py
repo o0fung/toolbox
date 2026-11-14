@@ -37,7 +37,7 @@ import os
 import re
 import sqlite3
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -1542,6 +1542,201 @@ def _gap_has_user_wake(cycles: Sequence[PowerLogEvent]) -> bool:
     return any(item.kind == "wake" for item in cycles)
 
 
+# A Wake row counts as the user looking only for these causes. macOS also
+# writes a Wake row for a dark wake ("DarkWake from Deep Idle", maintenance,
+# RTC, SMC). Those stay in the overnight digest.
+_USER_LOOKING_CAUSES = frozenset({"lid", "keyboard", "trackpad", "power button"})
+
+
+def _is_user_looking_reason(reason: str | None) -> bool:
+    return reason in _USER_LOOKING_CAUSES
+
+
+def _cycles_have_user_return(cycles: Sequence[PowerLogEvent]) -> bool:
+    return any(item.kind == "wake" and _is_user_looking_reason(item.reason) for item in cycles)
+
+
+def _registry_user_return(current: MonitorSnapshot) -> bool:
+    """True when the registry names a person, not a maintenance wake.
+
+    ``user_wake`` alone is not enough: the cause still has to be the lid,
+    keyboard, trackpad, or power button. A maintenance reason stays quiet.
+    """
+    if not _is_user_wake(current):
+        return False
+    return _is_user_looking_reason(_wake_cause(current))
+
+
+@dataclass
+class SleepDigest:
+    """Sleep and dark-wake rows kept until the user is looking.
+
+    Quiet mode does not print each maintenance cycle. One digest lives for
+    the process. A poll appends its gap. The summary is emitted when the
+    lid opens or a real user wake arrives, and again on exit if anything
+    is still held.
+    """
+
+    cycles: list[PowerLogEvent] = field(default_factory=list)
+    hold_was_on: bool = False
+    unavailable_seconds: float = 0.0
+    unavailable_cause: str | None = None
+    unavailable_at: float | None = None
+
+    @property
+    def pending(self) -> bool:
+        return bool(self.cycles) or self.unavailable_seconds > 0 or self.unavailable_cause is not None
+
+    def clear(self) -> None:
+        self.cycles.clear()
+        self.hold_was_on = False
+        self.unavailable_seconds = 0.0
+        self.unavailable_cause = None
+        self.unavailable_at = None
+
+    def catch_up(self) -> tuple[str, float | None]:
+        """The log line and the event time for everything held so far."""
+        if self.cycles:
+            return format_power_summary(self.cycles, hold=self.hold_was_on), self.cycles[0].at
+        return (
+            format_unavailable(
+                suspended_seconds=self.unavailable_seconds,
+                cause=self.unavailable_cause,
+                hold=self.hold_was_on,
+            ),
+            self.unavailable_at,
+        )
+
+    def live_phrase(self) -> str | None:
+        """Short form for the rewriting status line. None when nothing is held."""
+        if not self.pending:
+            return None
+        if self.cycles:
+            start = self.cycles[0].at
+            end = self.cycles[-1].at
+            parts = ["asleep", _format_span(end - start if end > start else 0.0)]
+            sleeps = sum(1 for item in self.cycles if item.kind == "sleep")
+            dark = sum(1 for item in self.cycles if item.kind == "darkwake")
+            if dark:
+                parts.append(_count_phrase(dark, "dark wake", "dark wakes"))
+            elif sleeps:
+                parts.append(_count_phrase(sleeps, "sleep", "sleeps"))
+            last = next((item for item in reversed(self.cycles) if item.kind in {"wake", "darkwake"}), None)
+            if last is not None:
+                parts.append(last.reason)
+            if self.hold_was_on:
+                parts.append("hold was on")
+            return " · ".join(parts)
+        parts = ["asleep"]
+        if self.unavailable_seconds > 0:
+            parts.append(f"about {_format_span(self.unavailable_seconds)}")
+        if self.unavailable_cause:
+            parts.append(self.unavailable_cause)
+        if self.hold_was_on:
+            parts.append("hold was on")
+        return " · ".join(parts)
+
+
+def absorb_sleep_gap(
+    digest: SleepDigest,
+    previous: MonitorSnapshot | None,
+    current: MonitorSnapshot,
+    *,
+    suspended_seconds: float,
+    hold: bool,
+) -> None:
+    """Append this poll's gap. Does not decide whether to print it.
+
+    Flow:
+    1. Power-log rows are appended. A real log replaces an earlier
+       unavailable guess. ``hold`` is remembered if it was on for any gap,
+       so the catch-up can say ``hold was on`` without printing overnight.
+    2. No rows. A moved ``kern.waketime`` or a long freeze is stored as the
+       unavailable fallback when the user woke the Mac or the hold was on.
+       A maintenance wake with the hold off is ignored.
+    """
+    cycles = current.power_cycles or ()
+    if cycles:
+        digest.cycles.extend(cycles)
+        digest.unavailable_seconds = 0.0
+        digest.unavailable_cause = None
+        digest.unavailable_at = None
+        if hold:
+            digest.hold_was_on = True
+        return
+
+    advanced = _wake_time_advanced(previous, current)
+    frozen = suspended_seconds >= _MIN_SUSPEND_SECONDS
+    user = advanced and _registry_user_return(current)
+    # Nothing new: an older wake time, or a short pause with the hold off.
+    if not user and not (frozen and hold) and not (advanced and hold):
+        return
+    if suspended_seconds > digest.unavailable_seconds:
+        digest.unavailable_seconds = suspended_seconds
+    if user or (advanced and digest.unavailable_cause is None):
+        digest.unavailable_cause = _wake_cause(current)
+        digest.unavailable_at = current.wake_at
+    if hold:
+        digest.hold_was_on = True
+
+
+def sleep_gap_should_flush(
+    previous: MonitorSnapshot | None,
+    current: MonitorSnapshot,
+) -> bool:
+    """True when this poll is the user looking, so the digest should print.
+
+    Flow:
+    1. The lid went from closed to open. That is the usual morning case,
+       including when this poll has no new power-log rows.
+    2. A power-log Wake row whose cause is the lid, keyboard, trackpad, or
+       power button. A Wake row that still describes a dark wake does not.
+    3. No power-log rows, but ``kern.waketime`` moved and the registry cause
+       is one of those same user causes.
+    """
+    if previous is not None and previous.lid == "closed" and current.lid == "open":
+        return True
+    cycles = current.power_cycles or ()
+    if _cycles_have_user_return(cycles):
+        return True
+    if not cycles and _wake_time_advanced(previous, current) and _registry_user_return(current):
+        return True
+    return False
+
+
+def format_live_status(
+    snapshot: MonitorSnapshot,
+    *,
+    hold: bool,
+    digest: SleepDigest | None = None,
+) -> str:
+    """One short row for the rewriting status line.
+
+    A pending digest replaces the lid and agent text. The night is a total
+    until the catch-up line is committed. Otherwise the row is the lid, how
+    many local agents are busy, and whether the hold is on.
+    """
+    if digest is not None and digest.pending:
+        phrase = digest.live_phrase()
+        if phrase:
+            return phrase
+    if snapshot.lid == "open":
+        lid = "lid open"
+    elif snapshot.lid == "closed":
+        lid = "lid closed"
+    else:
+        lid = f"lid {snapshot.lid}"
+    count = len(snapshot.agents)
+    if count == 0:
+        agents = "idle"
+    elif count == 1:
+        agents = "1 local agent"
+    else:
+        agents = f"{count} local agents"
+    held = "hold on" if hold else "hold off"
+    return f"{lid} · {agents} · {held}"
+
+
 def _log_power_gap(
     log: Callable[[str, str | None, float | None], None],
     previous: MonitorSnapshot | None,
@@ -1553,10 +1748,11 @@ def _log_power_gap(
 ) -> None:
     """Print one summary for the sleep/wake gap since the previous poll.
 
-    The process is frozen while the Mac is suspended, so one poll can cover
-    several real cycles. Rows from ``pmset -g log`` are that list. A freeze
-    length is only the fallback when the log has nothing in the window, and
-    it is not turned into one invented sleep start.
+    This is the ``--verbose`` printer. Quiet mode uses ``SleepDigest`` and
+    does not call this. The process is frozen while the Mac is suspended,
+    so one poll can cover several real cycles. Rows from ``pmset -g log``
+    are that list. A freeze length is only the fallback when the log has
+    nothing in the window, and it is not turned into one invented sleep start.
 
     Flow:
     1. Log rows exist. A user ``Wake`` is printed. Dark wakes alone stay
@@ -1640,6 +1836,7 @@ def _plan_quiet_status_events(
     hold: bool,
     home: str | None = None,
     suspended_seconds: float = 0.0,
+    sleep_digest: SleepDigest | None = None,
 ) -> list[StatusStep]:
     """Lines for sleep, lid close, and a hold change while the lid stays closed.
 
@@ -1648,30 +1845,40 @@ def _plan_quiet_status_events(
     next poll. A failed acquire or release is printed by the daemon itself.
 
     Flow:
-    1. One sleep summary when the power log, or a real new wake, is worth
-       reporting. The first poll is a baseline. A closed-lid acquire is not
-       quiet: the summary does not claim the hold until it is set.
-    2. Lid open: quiet acquire or release only. After a closed lid, one
-       ``lid opened`` line. A detection warning still prints.
+    1. Append this poll's power gap to ``sleep_digest``. Dark wakes and
+       maintenance Wake rows stay there. Print one summary only when the
+       user is looking (lid opened, or a lid/keyboard/trackpad/power-button
+       wake). A caller that passes no digest still prints a gap that is
+       already a user return, because that local digest starts empty.
+    2. Lid open: quiet acquire and quiet release. After a closed lid, one
+       ``lid opened`` line, after the sleep summary. A detection warning
+       still prints.
     3. Lid just closed, the busy/idle hold flipped, or Wi-Fi crossed between
        up and still-down: one summary. Agent names follow only while someone
-       is busy. Release is loud so the backend restore note is visible.
+       is busy. A closed-lid release stays loud so the restore note is visible.
     """
     steps: list[StatusStep] = []
     home_path = str(real_home()) if home is None else home
+    digest = sleep_digest if sleep_digest is not None else SleepDigest()
 
     def log(text: str, event: str | None = None, event_at: float | None = None) -> None:
         steps.append(StatusStep("log", text, event=event, event_at=event_at))
 
+    # Absorb before the flush check so a user wake in this gap is part of
+    # the summary, and a lid opening with no new rows still releases what
+    # earlier dark wakes already stored.
     if current.power_cycles or _sleep_cycle_changed(previous, current):
-        _log_power_gap(
-            log,
+        absorb_sleep_gap(
+            digest,
             previous,
             current,
             suspended_seconds=suspended_seconds,
             hold=hold,
-            verbose=False,
         )
+    if sleep_gap_should_flush(previous, current) and digest.pending:
+        text, event_at = digest.catch_up()
+        log(text, "sleep", event_at)
+        digest.clear()
 
     if current.warning and (previous is None or previous.warning != current.warning):
         log(f"detection warning: {current.warning}")
@@ -1684,29 +1891,31 @@ def _plan_quiet_status_events(
         else:
             log(f"lid {current.lid} ({current.lid_detail})", event="lid")
 
-    def hold_steps(quiet_acquire: bool) -> None:
-        # The summary is the success line. Release stays loud so the note
-        # from pmset or Amphetamine is still visible after the restore.
+    def hold_steps(*, quiet_acquire: bool, quiet_release: bool) -> None:
+        # Lid-open success lines stay off the scroll. A closed-lid release
+        # stays loud so the pmset or Amphetamine note is visible after restore.
+        # Failures are printed by the daemon either way.
         if not hold and current.want_hold:
             steps.append(StatusStep("acquire", "", quiet=quiet_acquire))
         elif hold and not current.want_hold:
-            # A lid-close summary already says the hold is ending. Don't add
-            # a second "releasing" line in front of the backend's own note.
-            announced = any(
-                step.kind == "log" and (step.text.startswith("lid closed") or "releasing sleep hold" in step.text)
-                for step in steps
-            )
-            if not announced:
-                if previous is not None and previous.agents and not current.agents:
-                    log("local agents idle; releasing sleep hold")
-                elif current.block_reason:
-                    log(f"releasing sleep hold: {current.block_reason}")
-                else:
-                    log("releasing sleep hold")
-            steps.append(StatusStep("release", ""))
+            if not quiet_release:
+                # A lid-close summary already says the hold is ending. Don't
+                # add a second "releasing" line in front of the backend note.
+                announced = any(
+                    step.kind == "log" and (step.text.startswith("lid closed") or "releasing sleep hold" in step.text)
+                    for step in steps
+                )
+                if not announced:
+                    if previous is not None and previous.agents and not current.agents:
+                        log("local agents idle; releasing sleep hold")
+                    elif current.block_reason:
+                        log(f"releasing sleep hold: {current.block_reason}")
+                    else:
+                        log("releasing sleep hold")
+            steps.append(StatusStep("release", "", quiet=quiet_release))
 
     if not lid_closed:
-        hold_steps(quiet_acquire=True)
+        hold_steps(quiet_acquire=True, quiet_release=True)
         return steps
 
     # Closed-lid story. Agent identity changes that do not flip the hold,
@@ -1730,7 +1939,7 @@ def _plan_quiet_status_events(
             log("local agents idle; releasing sleep hold")
     # The summary omits "sleep hold on" until the hold is already set.
     # A closed lid that still needs it prints "hold on" after acquire.
-    hold_steps(quiet_acquire=not (not hold and current.want_hold))
+    hold_steps(quiet_acquire=not (not hold and current.want_hold), quiet_release=False)
     return steps
 
 
@@ -1742,12 +1951,15 @@ def plan_status_events(
     verbose: bool = False,
     home: str | None = None,
     suspended_seconds: float = 0.0,
+    sleep_digest: SleepDigest | None = None,
 ) -> list[StatusStep]:
     """Build the status lines for one poll.
 
     The default is the short story: nothing while the lid is open, one
     summary when the lid closes or that closed-lid decision changes, and
-    the real sleep/wake lines. ``verbose`` is the line-by-line log.
+    one sleep line when the user is looking again. Pass the same
+    ``sleep_digest`` across polls to fold dark wakes into that line.
+    ``verbose`` is the line-by-line log and ignores the digest.
     """
     if verbose:
         return _plan_verbose_status_events(
@@ -1764,6 +1976,7 @@ def plan_status_events(
         hold=hold,
         home=home,
         suspended_seconds=suspended_seconds,
+        sleep_digest=sleep_digest,
     )
 
 

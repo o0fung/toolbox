@@ -1015,23 +1015,29 @@ def recover_orphan_lock(
         return f"restored leftover sleep hold ({detail})"
 
 
+def _awake_command(*args: str) -> list[str]:
+    """argv for this file, not ``python -m tools.coffee_awake``.
+
+    Importing the ``tools`` package runs ``tools/__init__.py``, which loads
+    the whole toolbox. ``runpy`` then warns that this module is already in
+    ``sys.modules``. This file has no package imports, so the helper and the
+    supervisor run it by path.
+    """
+    return [sys.executable, str(Path(__file__).resolve()), *args]
+
+
 def spawn_supervisor(state_dir: Path, parent_pid: int) -> subprocess.Popen[bytes]:
     """Start a detached process that restores the hold after ``parent_pid`` dies.
 
     The child is in its own session so SIGINT/SIGKILL of the daemon does not
     kill it. ``close_fds`` keeps it from inheriting the daemon singleton lock.
     """
-    env = os.environ.copy()
-    root = str(Path(__file__).resolve().parents[1])
-    env["PYTHONPATH"] = root + os.pathsep + env.get("PYTHONPATH", "")
     return subprocess.Popen(
-        [sys.executable, "-m", "tools.coffee_awake", "supervise", str(state_dir), str(parent_pid)],
+        _awake_command("supervise", str(state_dir), str(parent_pid)),
         start_new_session=True,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        env=env,
-        cwd=root,
         close_fds=True,
     )
 
@@ -1122,31 +1128,39 @@ class PmsetHelperClient:
         return PmsetReply(True, str(body.get("note") or ""), bool(body.get("owns")))
 
 
+def _helper_socket_gone(exc: BaseException) -> bool:
+    """The helper is not listening. A pmset failure is a different error.
+
+    ``connect()`` raises FileNotFoundError after the helper removes the
+    socket, and ConnectionRefusedError when the file is still there but the
+    process is gone. Those are chained as ``__cause__`` on CommandError.
+    """
+    return isinstance(exc.__cause__, (FileNotFoundError, ConnectionRefusedError))
+
+
 def _helper_socket_path(state_dir: Path) -> Path:
     return state_dir / "pmset.sock"
 
 
 def _spawn_pmset_helper(state_dir: Path, watch_pid: int) -> subprocess.Popen[bytes]:
-    """Start the helper. ``sudo -n`` is enough because ``sudo -v`` just ran."""
-    env = os.environ.copy()
-    root = str(Path(__file__).resolve().parents[1])
-    env["PYTHONPATH"] = root + os.pathsep + env.get("PYTHONPATH", "")
-    command = [sys.executable, "-m", "tools.coffee_awake", "pmset-helper", str(state_dir), str(watch_pid)]
+    """Start the helper. ``sudo -n`` is enough because ``sudo -v`` just ran.
+
+    Stay on this terminal so ``sudo -n`` sees the ticket from ``sudo -v``.
+    A new session can miss a per-tty sudo ticket, so this does not use
+    ``start_new_session``. The helper ignores SIGINT and SIGHUP once it is
+    root: sudo remains in the terminal job and forwards those signals.
+    """
+    command = _awake_command("pmset-helper", str(state_dir), str(watch_pid))
     if os.geteuid() != 0:
         command = ["sudo", "-n", *command]
     log_path = state_dir / "pmset-helper.log"
     handle = open(log_path, "a", encoding="utf-8")
-    # Stay in this terminal long enough for ``sudo -n`` to see the ticket
-    # from ``sudo -v``. The helper calls ``setsid`` once it is root, so a
-    # later Ctrl+C does not kill it before it can restore sleep.
     try:
         return subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
             stdout=handle,
             stderr=subprocess.STDOUT,
-            env=env,
-            cwd=root,
             close_fds=True,
         )
     finally:
@@ -1214,6 +1228,9 @@ def serve_pmset_helper(
        acquire, release, watch (follow a new pid), or quit.
     3. Between requests, if the watched pid is gone, restore the previous
        ``disablesleep`` and exit. A sleep cannot drop this privilege.
+    4. On every exit, including SIGTERM turned into SystemExit, restore
+       again if this process still owns the setting, then remove the
+       socket. A second restore is a no-op.
     """
     # A leftover hold from a killed coffee is cleared before this run takes one.
     try:
@@ -1358,6 +1375,14 @@ def serve_pmset_helper(
             finally:
                 conn.close()
     finally:
+        # SIGTERM arrives as SystemExit from the helper's signal handler.
+        # The pid-death break above may already have restored. A second
+        # call sees ``owns`` false and does nothing. Either way the socket
+        # is removed only after the previous disablesleep is written back.
+        try:
+            restore_owned()
+        except CommandError:
+            pass
         listener.close()
         try:
             sock_path.unlink()
@@ -1392,7 +1417,17 @@ class PmsetBackend:
 
     def acquire(self) -> str:
         if self.client is not None:
-            reply = self.client.acquire()
+            try:
+                reply = self.client.acquire()
+            except CommandError as exc:
+                if not _helper_socket_gone(exc):
+                    raise
+                # The helper died and its socket is gone. One restart uses
+                # the sudo ticket from the start of this run. A real pmset
+                # error is not restarted. If the ticket has expired, this
+                # raises once and the caller backs off.
+                self.client = start_pmset_helper(self.state_dir, os.getpid())
+                reply = self.client.acquire()
             self.owns_setting = reply.owns
             return reply.note
         # Read and record the previous value before changing it, but do not
@@ -1547,11 +1582,17 @@ class AmphetamineBackend:
         _end_amphetamine(self.run)
 
 
+def _exit_on_term(signum: int, frame: object) -> None:
+    """Turn SIGTERM into SystemExit so the helper's finally restores sleep."""
+    del signum, frame
+    raise SystemExit(128 + signal.SIGTERM)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Helper entry.
 
-    ``python -m tools.coffee_awake supervise STATE_DIR PID`` restores a hold
-    after that pid exits. ``pmset-helper`` is the root process that applies
+    ``coffee_awake.py supervise STATE_DIR PID`` restores a hold after that
+    pid exits. ``pmset-helper`` is the root process that applies
     ``disablesleep`` for the life of the run.
     """
     args = list(sys.argv[1:] if argv is None else argv)
@@ -1559,16 +1600,27 @@ def main(argv: list[str] | None = None) -> int:
         if os.geteuid() != 0:
             print("pmset helper must be root", file=sys.stderr)
             return 1
-        # Leave the coffee process group so Ctrl+C does not kill the helper
-        # before it restores disablesleep. Tests call serve_pmset_helper
-        # directly and must not detach the test process.
+        # Leave the coffee process group so a terminal Ctrl+C is not
+        # delivered directly. Tests call serve_pmset_helper directly and
+        # must not detach the test process. setsid can fail when sudo has
+        # already made this process a session leader; that error is ignored.
         try:
             os.setsid()
         except OSError:
             pass
+        # sudo stays in the terminal job and forwards SIGINT and SIGHUP
+        # even after setsid. Ignore both. Coffee exiting is what ends the
+        # hold: the accept loop restores disablesleep when the watched pid
+        # is gone. SIGTERM is an explicit kill and still runs that restore.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, _exit_on_term)
         state_dir = Path(args[1])
         watch_pid = int(args[2])
-        serve_pmset_helper(state_dir, watch_pid)
+        try:
+            serve_pmset_helper(state_dir, watch_pid)
+        except SystemExit:
+            return 128 + signal.SIGTERM
         return 0
     if len(args) == 3 and args[0] == "supervise":
         state_dir = Path(args[1])
@@ -1591,9 +1643,10 @@ def main(argv: list[str] | None = None) -> int:
             time.sleep(2.0)
             recover_orphan_lock(state_dir, only_pid=parent_pid)
         return 0
+    script = Path(__file__).name
     print(
-        "usage: python -m tools.coffee_awake supervise STATE_DIR PARENT_PID\n"
-        "       python -m tools.coffee_awake pmset-helper STATE_DIR WATCH_PID",
+        f"usage: {script} supervise STATE_DIR PARENT_PID\n"
+        f"       {script} pmset-helper STATE_DIR WATCH_PID",
         file=sys.stderr,
     )
     return 2

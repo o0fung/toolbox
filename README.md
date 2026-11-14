@@ -612,7 +612,7 @@ The `browser` setting is an optional command template for `--browse`; `%s` is re
 
 Keep a Mac awake while a **local** Cursor agent is working, including with the lid closed, then allow sleep when that work is finished. Cloud agents do not hold the machine awake.
 
-Foreground is the default so the terminal shows the session. While the lid is open, coffee still takes and releases the sleep hold, and it prints nothing about that. A line is printed when the lid closes, when that closed-lid decision changes, and once after the Mac wakes (`--verbose` also prints every sleep cycle, every agent and hold change, and every poll).
+Foreground is the default so the terminal shows the session. After the password, one line says the session started. While the lid is open, coffee still takes and releases the sleep hold, and it does not add a log line for that. A foreground terminal keeps one status line at the bottom (`lid open · 1 local agent · hold on`) and rewrites it on each poll. A real line is printed when the lid closes and when that closed-lid decision changes. Dark wakes are kept until you open the lid, or wake the Mac from the keyboard, trackpad, or power button; then one line covers the whole stretch (`--verbose` also prints every sleep cycle, every agent and hold change, and every poll). A background run and a pipe stay append-only: they get the session line, the lid line, and the catch-up, not the rewriting row.
 
 ```text
 2026-11-07 07:44:40  lid closed; no external display, so this is not clamshell; 1 local agent busy; sleep hold on; Wi-Fi on
@@ -625,11 +625,14 @@ Foreground is the default so the terminal shows the session. While the lid is op
 
 An external display, power, and an external keyboard and mouse is Apple's clamshell mode. The lid line then says `clamshell (external display connected)`. Without the display, closing the lid is not clamshell. Coffee keeps the sleep hold and, while a local agent is busy, turns the Wi-Fi radio back on if macOS powered it off. `Wi-Fi still down; agent is not finished` means the radio is on with no route, or it would not stay on. The antennas are in the display, so a shut lid can still be too weak to hold a connection.
 
-If Amphetamine is missing or not ready for a closed lid, startup is two lines and then the password. The checkbox steps stay on `lf coffee setup` and `lf coffee status`. `--verbose` prints them after the password.
+If Amphetamine is missing or not ready for a closed lid, startup is two lines and then the password. After the password is accepted, one line says the session started. The same line is printed when no password is needed. The checkbox steps stay on `lf coffee setup` and `lf coffee status`. `--verbose` prints them after the password.
 
 ```text
 2026-11-07 07:43:01  coffee · pmset · idle 120s · poll 20s
 2026-11-07 07:43:01  Amphetamine is not installed. Password once for this run.
+Password:
+2026-11-07 07:43:08  coffee session started
+lid open · idle · hold off
 ```
 
 ```sh
@@ -646,7 +649,7 @@ lf coffee stop
 
 Lid state comes from IORegistry `AppleClamshellState` (`Yes` means closed). That sensor is best-effort: desktops and some VMs do not expose it, and the line says so. A closed lid names clamshell or not, how many local agents are busy, and Wi-Fi. Closing the lid is not itself system sleep. An external display is detected from `system_profiler` connection types other than `Internal`.
 
-`hold off` means coffee stopped blocking sleep. The Mac may still be awake. System sleep is one later line, printed on the next poll after the Mac wakes. That line counts every Sleep, Wake, and DarkWake from `pmset -g log` in the gap, so several cycles are not shown as one short sleep. A wake from before the gap, including one from before `lf coffee` started, is not printed. If the power log cannot be read, the line says the Mac was unavailable for about that long and does not invent a sleep start. Maintenance wakes stay in the summary when they are part of the gap. A gap with no user wake and no failed hold stays quiet unless `--verbose`. `hold was on` on that line means the Mac slept while coffee still held sleep. `lf coffee status` repeats the latest lid and sleep summary. Keywords such as `hold on`, `lid closed`, and `Wi-Fi still down` are colored on a terminal.
+`hold off` means coffee stopped blocking sleep. The Mac may still be awake. While the lid is open that change is only the status line, not a log row. System sleep is one later line, printed when you are looking again: the lid opens, or the wake cause is the keyboard, trackpad, or power button. Until then, dark wakes and maintenance Wake rows (including a Wake row whose text is still `DarkWake from Deep Idle`) stay in a running total. That catch-up line counts every Sleep, Wake, and DarkWake from `pmset -g log` across the whole stretch, so several cycles are not shown as one short sleep. A wake from before `lf coffee` started is not printed. If the power log cannot be read, the line says the Mac was unavailable for about that long and does not invent a sleep start. `hold was on` on that line means the Mac slept while coffee still held sleep; it waits for the catch-up instead of printing during the night. Quitting with Ctrl+C prints a pending total before `stopping`. `lf coffee status` repeats the latest lid line and that running total. Keywords such as `hold on`, `lid closed`, and `Wi-Fi still down` are colored on a terminal.
 
 **Backends**
 

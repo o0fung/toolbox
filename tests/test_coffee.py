@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import plistlib
@@ -999,15 +1000,19 @@ class HoldAndStatusTests(unittest.TestCase):
         )
         self.assertTrue(any(step.text.startswith("unavailable for about 30s") for step in noisy))
         self.assertTrue(any("last wake maintenance" in step.text for step in noisy))
+        digest = coffee_activity.SleepDigest()
         failed = coffee_activity.plan_status_events(
             before,
             after,
             hold=True,
             verbose=False,
             suspended_seconds=30,
+            sleep_digest=digest,
         )
-        self.assertTrue(any("hold was on" in step.text for step in failed))
-        self.assertTrue(any(step.text.startswith("unavailable for about 30s") for step in failed))
+        self.assertFalse(any(step.event == "sleep" for step in failed))
+        caught_up, _at = digest.catch_up()
+        self.assertIn("hold was on", caught_up)
+        self.assertTrue(caught_up.startswith("unavailable for about 30s"))
 
     def test_short_freeze_skips_the_estimated_sleep_start(self) -> None:
         before = self._cycle(sleep_wake_id="cycle-a", wake_at=1_700_000_000.0)
@@ -1169,15 +1174,19 @@ class HoldAndStatusTests(unittest.TestCase):
         )
         self.assertTrue(any(step.text.startswith("unavailable for about 30s") for step in noisy))
         self.assertTrue(any("last wake maintenance" in step.text for step in noisy))
+        digest = coffee_activity.SleepDigest()
         failed = coffee_activity.plan_status_events(
             before,
             after,
             hold=True,
             verbose=False,
             suspended_seconds=30,
+            sleep_digest=digest,
         )
-        self.assertTrue(any("hold was on" in step.text for step in failed))
-        self.assertTrue(any(step.text.startswith("unavailable for about 30s") for step in failed))
+        self.assertFalse(any(step.event == "sleep" for step in failed))
+        caught_up, _at = digest.catch_up()
+        self.assertIn("hold was on", caught_up)
+        self.assertTrue(caught_up.startswith("unavailable for about 30s"))
 
     def test_short_freeze_skips_the_estimated_sleep_start(self) -> None:
         before = self._cycle(sleep_wake_id="cycle-a", wake_at=1_700_000_000.0)
@@ -1505,8 +1514,238 @@ class HoldAndStatusTests(unittest.TestCase):
         )
         quiet = coffee_activity.plan_status_events(before, after, hold=False, verbose=False)
         self.assertFalse(any(step.event == "sleep" for step in quiet))
-        failed = coffee_activity.plan_status_events(before, after, hold=True, verbose=False)
-        self.assertTrue(any("hold was on" in step.text and "1 dark wake" in step.text for step in failed))
+        digest = coffee_activity.SleepDigest()
+        failed = coffee_activity.plan_status_events(
+            before, after, hold=True, verbose=False, sleep_digest=digest
+        )
+        self.assertFalse(any(step.event == "sleep" for step in failed))
+        caught_up, _at = digest.catch_up()
+        self.assertIn("hold was on", caught_up)
+        self.assertIn("1 dark wake", caught_up)
+
+    def test_dark_wake_rows_that_look_like_a_user_wake_stay_in_the_digest(self) -> None:
+        start = 1_700_000_000.0
+        reason = "DarkWake from Deep Idle [CDNP] : due to smc.sysState.Wake"
+        cycles = (
+            coffee_activity.PowerLogEvent("sleep", start, "Idle Sleep"),
+            coffee_activity.PowerLogEvent("darkwake", start + 20, reason),
+            coffee_activity.PowerLogEvent("wake", start + 20, reason),
+        )
+        before = self._cycle(lid="closed", user_wake=False, sleep_wake_id="cycle-a", wake_at=start - 30)
+        after = self._cycle(
+            lid="closed",
+            user_wake=False,
+            wake_reason="Maintenance",
+            sleep_wake_id="cycle-b",
+            wake_at=start + 20,
+            power_cycles=cycles,
+            power_log_read=True,
+        )
+        digest = coffee_activity.SleepDigest()
+        steps = coffee_activity.plan_status_events(before, after, hold=False, sleep_digest=digest)
+        self.assertFalse(any(step.event == "sleep" for step in steps))
+        self.assertTrue(digest.pending)
+        maintenance = (
+            coffee_activity.PowerLogEvent("sleep", start + 40, "Maintenance Sleep"),
+            coffee_activity.PowerLogEvent("wake", start + 50, "maintenance"),
+        )
+        later = self._cycle(
+            lid="closed",
+            user_wake=False,
+            wake_reason="Maintenance",
+            sleep_wake_id="cycle-c",
+            wake_at=start + 50,
+            power_cycles=maintenance,
+            power_log_read=True,
+        )
+        stayed = coffee_activity.plan_status_events(after, later, hold=False, sleep_digest=digest)
+        self.assertFalse(any(step.event == "sleep" for step in stayed))
+        self.assertTrue(digest.pending)
+
+    def test_dark_wakes_catch_up_when_the_lid_opens(self) -> None:
+        start = 1_700_000_000.0
+        digest = coffee_activity.SleepDigest()
+        base = self._cycle(
+            lid="closed",
+            user_wake=False,
+            wake_reason="Maintenance",
+            sleep_wake_id="cycle-a",
+            wake_at=start - 10,
+        )
+        first_gap = (
+            coffee_activity.PowerLogEvent("sleep", start, "Idle Sleep"),
+            coffee_activity.PowerLogEvent("darkwake", start + 60, "maintenance"),
+            coffee_activity.PowerLogEvent("wake", start + 60, "maintenance"),
+        )
+        first = self._cycle(
+            lid="closed",
+            user_wake=False,
+            wake_reason="Maintenance",
+            sleep_wake_id="cycle-b",
+            wake_at=start + 60,
+            power_cycles=first_gap,
+            power_log_read=True,
+        )
+        second_gap = (
+            coffee_activity.PowerLogEvent("sleep", start + 120, "Maintenance Sleep"),
+            coffee_activity.PowerLogEvent("darkwake", start + 200, "maintenance"),
+        )
+        second = self._cycle(
+            lid="closed",
+            user_wake=False,
+            wake_reason="Maintenance",
+            sleep_wake_id="cycle-c",
+            wake_at=start + 200,
+            power_cycles=second_gap,
+            power_log_read=True,
+        )
+        self.assertFalse(
+            any(
+                step.event == "sleep"
+                for step in coffee_activity.plan_status_events(base, first, hold=False, sleep_digest=digest)
+            )
+        )
+        self.assertFalse(
+            any(
+                step.event == "sleep"
+                for step in coffee_activity.plan_status_events(first, second, hold=False, sleep_digest=digest)
+            )
+        )
+        opening = (
+            coffee_activity.PowerLogEvent("sleep", start + 300, "Clamshell Sleep"),
+            coffee_activity.PowerLogEvent("wake", start + 400, "lid"),
+        )
+        opened = self._cycle(
+            lid="open",
+            user_wake=True,
+            wake_reason="EC.LidOpen",
+            sleep_wake_id="cycle-d",
+            wake_at=start + 400,
+            power_cycles=opening,
+            power_log_read=True,
+        )
+        steps = coffee_activity.plan_status_events(second, opened, hold=False, sleep_digest=digest)
+        self.assertEqual([step.event for step in steps], ["sleep", "lid"])
+        self.assertIn("3 sleeps, 2 dark wakes", steps[0].text)
+        self.assertIn("last wake lid", steps[0].text)
+        self.assertEqual(steps[0].event_at, start)
+        self.assertEqual(steps[1].text, "lid opened")
+        self.assertFalse(digest.pending)
+
+    def test_opening_the_lid_flushes_without_a_new_power_row(self) -> None:
+        start = 1_700_000_000.0
+        digest = coffee_activity.SleepDigest()
+        closed = self._cycle(
+            lid="closed",
+            user_wake=False,
+            wake_reason="Maintenance",
+            sleep_wake_id="cycle-a",
+            wake_at=start,
+        )
+        dark = self._cycle(
+            lid="closed",
+            user_wake=False,
+            wake_reason="Maintenance",
+            sleep_wake_id="cycle-b",
+            wake_at=start + 20,
+            power_cycles=(
+                coffee_activity.PowerLogEvent("sleep", start, "Idle Sleep"),
+                coffee_activity.PowerLogEvent("darkwake", start + 20, "maintenance"),
+            ),
+            power_log_read=True,
+        )
+        self.assertFalse(
+            any(
+                step.event == "sleep"
+                for step in coffee_activity.plan_status_events(closed, dark, hold=False, sleep_digest=digest)
+            )
+        )
+        opened = self._cycle(
+            lid="open",
+            user_wake=False,
+            wake_reason="Maintenance",
+            sleep_wake_id="cycle-b",
+            wake_at=start + 20,
+        )
+        steps = coffee_activity.plan_status_events(dark, opened, hold=False, sleep_digest=digest)
+        self.assertEqual([step.event for step in steps], ["sleep", "lid"])
+        self.assertIn("1 dark wake", steps[0].text)
+        self.assertEqual(steps[1].text, "lid opened")
+        self.assertFalse(digest.pending)
+
+    def test_keyboard_wake_flushes_even_when_the_lid_stayed_open(self) -> None:
+        start = 1_700_000_000.0
+        digest = coffee_activity.SleepDigest()
+        before = self._cycle(lid="open", user_wake=False, sleep_wake_id="cycle-a", wake_at=start - 30)
+        dark = (
+            coffee_activity.PowerLogEvent("sleep", start, "Idle Sleep"),
+            coffee_activity.PowerLogEvent("darkwake", start + 20, "maintenance"),
+        )
+        asleep = self._cycle(
+            lid="open",
+            user_wake=False,
+            wake_reason="Maintenance",
+            sleep_wake_id="cycle-b",
+            wake_at=start + 20,
+            power_cycles=dark,
+            power_log_read=True,
+        )
+        quiet = coffee_activity.plan_status_events(before, asleep, hold=False, sleep_digest=digest)
+        self.assertFalse(any(step.event == "sleep" for step in quiet))
+        keyed = self._cycle(
+            lid="open",
+            user_wake=True,
+            wake_reason="HID Activity keyboard",
+            sleep_wake_id="cycle-c",
+            wake_at=start + 100,
+            power_cycles=(coffee_activity.PowerLogEvent("wake", start + 100, "keyboard"),),
+            power_log_read=True,
+        )
+        steps = coffee_activity.plan_status_events(asleep, keyed, hold=False, sleep_digest=digest)
+        self.assertEqual([step.event for step in steps], ["sleep"])
+        self.assertIn("last wake keyboard", steps[0].text)
+        self.assertIn("1 dark wake", steps[0].text)
+        self.assertEqual(steps[0].event_at, start)
+        self.assertFalse(digest.pending)
+
+    def test_lid_open_release_does_not_log(self) -> None:
+        busy = _snap(
+            agents=(_agent(),),
+            phase=coffee_activity.AgentPhase.BUSY,
+            want_hold=True,
+        )
+        steps = coffee_activity.plan_status_events(busy, _snap(), hold=True, home=HOME)
+        self.assertEqual([step.kind for step in steps], ["release"])
+        self.assertTrue(steps[0].quiet)
+        self.assertEqual(steps[0].text, "")
+
+    def test_live_status_prefers_the_sleep_total(self) -> None:
+        snap = _snap()
+        self.assertEqual(
+            coffee_activity.format_live_status(snap, hold=False),
+            "lid open · idle · hold off",
+        )
+        busy = _snap(
+            agents=(_agent(),),
+            phase=coffee_activity.AgentPhase.BUSY,
+            want_hold=True,
+        )
+        self.assertEqual(
+            coffee_activity.format_live_status(busy, hold=True),
+            "lid open · 1 local agent · hold on",
+        )
+        digest = coffee_activity.SleepDigest()
+        start = 1_700_000_000.0
+        digest.cycles.extend(
+            [
+                coffee_activity.PowerLogEvent("sleep", start, "Idle Sleep"),
+                coffee_activity.PowerLogEvent("darkwake", start + 3600, "maintenance"),
+            ]
+        )
+        self.assertEqual(
+            coffee_activity.format_live_status(snap, hold=False, digest=digest),
+            "asleep · 1h · 1 dark wake · maintenance",
+        )
 
     def test_closed_lid_does_not_claim_the_hold_before_it_is_set(self) -> None:
         closed = _snap(
@@ -1601,6 +1840,51 @@ class HoldAndStatusTests(unittest.TestCase):
         self.assertIn("lid closed", _plain(colored))
         self.assertNotEqual(colored, plain)
         self.assertIn("\x1b[", colored)
+
+    def test_session_starts_only_when_the_hold_can_be_taken(self) -> None:
+        self.assertEqual(coffee.session_start_line(hold_available=True), "coffee session started")
+        self.assertIsNone(coffee.session_start_line(hold_available=False))
+
+    def test_live_line_rewrites_only_when_enabled(self) -> None:
+        stream = io.StringIO()
+        quiet = coffee.LiveLine(stream, enabled=False)
+        quiet.draw("lid open · idle · hold off")
+        quiet.break_for_log()
+        self.assertEqual(stream.getvalue(), "")
+
+        shown = io.StringIO()
+        line = coffee.LiveLine(shown, enabled=True)
+        line.draw("lid open · idle · hold off")
+        self.assertIn("\r", shown.getvalue())
+        self.assertIn("\x1b[K", shown.getvalue())
+        self.assertIn("lid open · idle · hold off", shown.getvalue())
+        after_first = shown.getvalue()
+        line.draw("lid open · idle · hold off")
+        self.assertEqual(shown.getvalue(), after_first)
+        line.draw("lid open · 1 local agent · hold on")
+        self.assertEqual(shown.getvalue().count("\r"), 2)
+        self.assertIn("1 local agent", shown.getvalue())
+
+    def test_emit_breaks_the_live_line_before_the_log_row(self) -> None:
+        stream = io.StringIO()
+        line = coffee.LiveLine(stream, enabled=True)
+        line.draw("lid open · idle · hold off")
+        seen: list[str] = []
+
+        def _info(message: str) -> None:
+            self.assertIn("\n", stream.getvalue())
+            seen.append(message)
+
+        coffee._LIVE = line
+        try:
+            with patch("tools.coffee.info", side_effect=_info):
+                coffee.emit("coffee session started", now=datetime(2026, 11, 13, 13, 42, 50))
+        finally:
+            coffee._LIVE = None
+        self.assertEqual(seen, ["2026-11-13 13:42:50  coffee session started"])
+        self.assertFalse(line._open)
+        line.close()
+        self.assertTrue(stream.getvalue().endswith("\n"))
 
     def test_amphetamine_session_failure_announces_the_pmset_switch(self) -> None:
         class AmpFail:
@@ -2039,6 +2323,147 @@ class AwakeBackendTests(unittest.TestCase):
             thread.join(timeout=2)
             self.assertFalse(thread.is_alive())
 
+    def test_pmset_helper_exit_restores_disablesleep_and_removes_the_socket(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            value = {"sleep": "0"}
+            run, calls = self._runner(value)
+            # Set after acquire returns. The next poll raises SystemExit
+            # instead of the normal pid-death path, so restore has to happen
+            # in the helper's finally block.
+            stop = {"now": False}
+
+            def pid_alive_fn(_pid: int) -> bool:
+                if stop["now"]:
+                    raise SystemExit(143)
+                return True
+
+            def target() -> None:
+                try:
+                    coffee_awake.serve_pmset_helper(
+                        state_dir,
+                        os.getpid(),
+                        run=run,
+                        pid_alive_fn=pid_alive_fn,
+                        poll_seconds=0.05,
+                    )
+                except SystemExit:
+                    return
+
+            thread = threading.Thread(target=target, daemon=True)
+            thread.start()
+            sock = state_dir / "pmset.sock"
+            client = coffee_awake.PmsetHelperClient(sock)
+            taken = None
+            deadline = time.time() + 3
+            while time.time() < deadline:
+                if sock.exists():
+                    try:
+                        taken = client.acquire()
+                    except coffee_awake.CommandError:
+                        time.sleep(0.05)
+                        continue
+                    break
+                time.sleep(0.02)
+            self.assertIsNotNone(taken)
+            assert taken is not None
+            self.assertTrue(taken.owns)
+            self.assertEqual(value["sleep"], "1")
+            stop["now"] = True
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+            self.assertFalse(sock.exists())
+            self.assertFalse((state_dir / "hold.lock").exists())
+            self.assertEqual(value["sleep"], "0")
+            self.assertTrue(any(argv[:4] == ["/usr/bin/pmset", "-a", "disablesleep", "0"] for argv in calls))
+
+    def test_pmset_acquire_restarts_a_missing_helper_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+
+            def gone() -> None:
+                raise coffee_awake.CommandError(
+                    ["pmset-helper"],
+                    1,
+                    "[Errno 2] No such file or directory",
+                ) from FileNotFoundError(2, "No such file or directory")
+
+            class GoneClient:
+                def acquire(self) -> coffee_awake.PmsetReply:
+                    gone()
+                    raise AssertionError("unreachable")
+
+            class LiveClient:
+                def acquire(self) -> coffee_awake.PmsetReply:
+                    return coffee_awake.PmsetReply(True, "pmset disablesleep 1", True)
+
+            starts: list[int] = []
+
+            def start(path: Path, pid: int) -> LiveClient:
+                self.assertEqual(path, state_dir)
+                self.assertEqual(pid, os.getpid())
+                starts.append(pid)
+                return LiveClient()
+
+            backend = coffee_awake.PmsetBackend(state_dir, client=GoneClient())  # type: ignore[arg-type]
+            with patch.object(coffee_awake, "start_pmset_helper", start):
+                note = backend.acquire()
+            self.assertEqual(note, "pmset disablesleep 1")
+            self.assertTrue(backend.owns_setting)
+            self.assertEqual(starts, [os.getpid()])
+            self.assertIsInstance(backend.client, LiveClient)
+
+            # A second dead socket in the same acquire starts the helper once, then raises.
+            starts.clear()
+
+            def start_still_gone(path: Path, pid: int) -> GoneClient:
+                del path
+                starts.append(pid)
+                return GoneClient()
+
+            backend = coffee_awake.PmsetBackend(state_dir, client=GoneClient())  # type: ignore[arg-type]
+            with patch.object(coffee_awake, "start_pmset_helper", start_still_gone):
+                with self.assertRaises(coffee_awake.CommandError) as caught:
+                    backend.acquire()
+            self.assertEqual(starts, [os.getpid()])
+            self.assertIsInstance(caught.exception.__cause__, FileNotFoundError)
+            self.assertFalse(backend.owns_setting)
+
+    def test_pmset_acquire_does_not_restart_helper_after_a_pmset_error(self) -> None:
+        class FailedClient:
+            def acquire(self) -> coffee_awake.PmsetReply:
+                raise coffee_awake.CommandError(["pmset-helper"], 1, "/usr/bin/pmset -a disablesleep 1 failed")
+
+        with tempfile.TemporaryDirectory() as temp:
+            backend = coffee_awake.PmsetBackend(Path(temp), client=FailedClient())  # type: ignore[arg-type]
+            with patch.object(coffee_awake, "start_pmset_helper") as start:
+                with self.assertRaises(coffee_awake.CommandError):
+                    backend.acquire()
+            start.assert_not_called()
+            self.assertFalse(backend.owns_setting)
+
+    def test_helper_and_supervisor_run_this_file(self) -> None:
+        script = str(Path(coffee_awake.__file__).resolve())
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            with patch.object(coffee_awake.subprocess, "Popen", return_value=object()) as popen:
+                coffee_awake.spawn_supervisor(state, 123)
+                self.assertEqual(
+                    popen.call_args.args[0],
+                    [coffee_awake.sys.executable, script, "supervise", str(state), "123"],
+                )
+                self.assertTrue(popen.call_args.kwargs.get("start_new_session"))
+                self.assertNotIn("-m", popen.call_args.args[0])
+
+                popen.reset_mock()
+                coffee_awake._spawn_pmset_helper(state, 456)
+                expected = [coffee_awake.sys.executable, script, "pmset-helper", str(state), "456"]
+                if os.geteuid() != 0:
+                    expected = ["sudo", "-n", *expected]
+                self.assertEqual(popen.call_args.args[0], expected)
+                self.assertNotIn("-m", popen.call_args.args[0])
+                self.assertFalse(popen.call_args.kwargs.get("start_new_session", False))
+
     def test_pmset_acquire_restores_and_does_not_steal_an_existing_setting(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state_dir = Path(temp)
@@ -2376,6 +2801,53 @@ class CoffeeCliTests(unittest.TestCase):
                     run=fail,
                 )
             self.assertFalse((state / "setup-opened-missing").exists())
+
+    def test_acquire_backoff_drops_a_queued_acquire(self) -> None:
+        queued = [
+            coffee_activity.StatusStep("log", "lid opened"),
+            coffee_activity.StatusStep("acquire", "", quiet=True),
+            coffee_activity.StatusStep("release", ""),
+        ]
+        waiting = coffee._acquire_steps_for_poll(
+            queued,
+            now=10,
+            retry_at=400,
+            want_hold=True,
+            held=False,
+            quiet=True,
+        )
+        self.assertEqual([step.kind for step in waiting], ["log", "release"])
+
+        due = coffee._acquire_steps_for_poll(
+            [coffee_activity.StatusStep("log", "lid opened")],
+            now=400,
+            retry_at=400,
+            want_hold=True,
+            held=False,
+            quiet=True,
+        )
+        self.assertEqual([step.kind for step in due], ["log", "acquire"])
+        self.assertTrue(due[-1].quiet)
+
+        kept = coffee._acquire_steps_for_poll(
+            queued,
+            now=500,
+            retry_at=400,
+            want_hold=True,
+            held=False,
+            quiet=False,
+        )
+        self.assertEqual([step.kind for step in kept], ["log", "acquire", "release"])
+
+        idle = coffee._acquire_steps_for_poll(
+            [coffee_activity.StatusStep("log", "lid opened")],
+            now=500,
+            retry_at=400,
+            want_hold=False,
+            held=False,
+            quiet=False,
+        )
+        self.assertEqual([step.kind for step in idle], ["log"])
 
 
 if __name__ == "__main__":

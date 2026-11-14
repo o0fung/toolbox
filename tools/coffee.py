@@ -15,11 +15,13 @@ per run; a root helper keeps the privilege across sleep. The previous
 process dies. ``sudo lf coffee`` does not ask a second time, and still reads
 the invoking user's Cursor files.
 
-The foreground process stays quiet while the lid is open. It prints one
-summary when the lid closes and when that decision changes. After the Mac
-wakes, one line summarizes the real sleep and wake cycles from ``pmset -g
-log``. ``--verbose`` prints every cycle, agent, and hold change. Releasing
-the hold is not system sleep.
+The foreground process keeps one live status line while you can see the
+terminal. It prints a real line when the session starts, when the lid
+closes, and when that closed-lid decision changes. Dark wakes stay in a
+running total until you open the lid or wake the Mac from the keyboard,
+trackpad, or power button; then one line covers the whole stretch.
+``--verbose`` prints every cycle, agent, and hold change. Releasing the
+hold is not system sleep.
 """
 
 from __future__ import annotations
@@ -186,14 +188,70 @@ def require_macos() -> None:
     )
 
 
+class LiveLine:
+    """One status row rewritten in place on a foreground terminal.
+
+    A log file stays append-only. ``break_for_log`` ends the row before a
+    dated line so that line is not painted over the status. ``close`` does
+    the same on the way out so the shell prompt does not eat the row.
+    """
+
+    def __init__(self, stream: Any, *, enabled: bool) -> None:
+        self._stream = stream
+        self.enabled = enabled
+        self._text: str | None = None
+        self._open = False
+
+    def draw(self, text: str) -> None:
+        if not self.enabled or (self._open and text == self._text):
+            return
+        self._stream.write(f"\r{paint(text)}\x1b[K")
+        self._stream.flush()
+        self._text = text
+        self._open = True
+
+    def break_for_log(self) -> None:
+        if not self.enabled or not self._open:
+            return
+        self._stream.write("\n")
+        self._stream.flush()
+        self._open = False
+
+    def close(self) -> None:
+        self.break_for_log()
+
+
+# The foreground loop sets this so ``emit`` can end the live row first.
+_LIVE: LiveLine | None = None
+
+
 def emit(text: str, *, now: datetime | None = None) -> None:
     """Print one dated status line. Callers should not print every poll.
 
     The stored event text is the plain ``text``. Color is applied only to
-    the line written to the terminal.
+    the line written to the terminal. A live status row is ended first so
+    this line starts on its own row.
     """
+    if _LIVE is not None:
+        _LIVE.break_for_log()
     stamp = (now or datetime.now()).strftime(_STAMP_FORMAT)
     _say(f"{stamp}  {text}")
+
+
+def session_start_line(*, hold_available: bool) -> str | None:
+    """Confirmation that this run is going, once the password has succeeded.
+
+    ``None`` when the pmset helper did not start. That path already said the
+    hold was not taken; a second "session started" would be wrong.
+    """
+    if not hold_available:
+        return None
+    return "coffee session started"
+
+
+def _live_line_enabled(config: CoffeeConfig) -> bool:
+    """The rewriting row is only for a foreground terminal, and not ``--verbose``."""
+    return sys.stdout.isatty() and not config.verbose and not config.background
 
 
 def release_line(note: str) -> str:
@@ -495,7 +553,8 @@ def _emit_details(config: CoffeeConfig, readiness: awake.AmphetamineReadiness) -
         "Lid state is best-effort. With the lid open the log stays quiet. "
         "A closed lid without an external display is not clamshell mode; "
         "coffee turns Wi-Fi back on if macOS powered the radio off. "
-        "System sleep is one summary on the next poll after the Mac wakes."
+        "Dark wakes are one catch-up summary when you open the lid or wake "
+        "the Mac from the keyboard, trackpad, or power button."
     )
 
 
@@ -653,6 +712,33 @@ def _with_power_gap(
         return replace(snapshot, power_cycles=(), power_log_read=False)
     cycles = activity.parse_pmset_log(raw, start=gap_start, end=end)
     return replace(snapshot, power_cycles=cycles, power_log_read=True)
+
+
+def _acquire_steps_for_poll(
+    steps: list[activity.StatusStep],
+    *,
+    now: float,
+    retry_at: float,
+    want_hold: bool,
+    held: bool,
+    quiet: bool,
+) -> list[activity.StatusStep]:
+    """Decide whether this poll may try to take the sleep hold.
+
+    Flow:
+    1. After a failed acquire, ``retry_at`` is a few minutes ahead. Drop
+       every acquire the status plan already queued. That plan adds one on
+       every poll while an agent is busy and the hold is off, which would
+       otherwise log the same failure on every poll.
+    2. Once the backoff has elapsed, keep an acquire the plan already
+       queued. If it did not, and the hold is still wanted, append one.
+       ``quiet`` hides the success line while the lid is open.
+    """
+    if now < retry_at:
+        return [step for step in steps if step.kind != "acquire"]
+    if want_hold and not held and not any(step.kind == "acquire" for step in steps):
+        return [*steps, activity.StatusStep("acquire", "", quiet=quiet)]
+    return steps
 
 
 def _apply_steps(
@@ -840,17 +926,20 @@ def serve(config: CoffeeConfig) -> None:
 
     Each iteration reads the lid, the last system sleep/wake, the power
     source, and local agent signals. With the lid open the hold still tracks
-    agents, but the log stays quiet. A closed lid prints one summary,
-    including whether an external display makes this clamshell and whether
-    Wi-Fi is up. While the lid stays closed, the next line is a hold change
-    or Wi-Fi crossing to still-down. A real system sleep is printed later,
-    on the first poll after the Mac wakes, as one summary of the power log.
-    ``--verbose`` keeps the per-agent lines and lists each sleep cycle.
+    agents. A foreground terminal shows that as one rewriting status line,
+    not a log row per agent. A closed lid prints one summary, including
+    whether an external display makes this clamshell and whether Wi-Fi is
+    up. While the lid stays closed, the next log line is a hold change or
+    Wi-Fi crossing to still-down. Dark wakes accumulate until the lid opens
+    or a keyboard, trackpad, or power-button wake, then one summary covers
+    the whole stretch. ``--verbose`` keeps the per-agent lines and lists
+    each sleep cycle as it happens.
 
     Observation errors do not immediately drop a hold that is already on.
     Three failed polls in a row release it, so a stuck reader cannot pin the
     Mac awake. A failed acquire is retried after a few minutes, not every poll.
     """
+    global _LIVE
     require_macos()
     state_dir = coffee_state_dir()
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -864,8 +953,13 @@ def serve(config: CoffeeConfig) -> None:
     for line in startup_lines(config, backend_name, readiness):
         emit(line)
     access = _PmsetAccess()
+    hold_available = True
     if backend_name == "pmset" and not config.dry_run:
         _open_pmset(state_dir, access, announced=True)
+        hold_available = not access.failed
+    started = session_start_line(hold_available=hold_available)
+    if started:
+        emit(started)
     if config.verbose:
         _emit_details(config, readiness)
     if readiness.state in {"missing", "not-configured", "not-usable"}:
@@ -939,10 +1033,27 @@ def serve(config: CoffeeConfig) -> None:
     # is read for events after it, which is the gap this process was frozen.
     suspended_seconds = 0.0
     gap_start: float | None = None
+    # Dark wakes stay here until the user is looking. Verbose prints each
+    # cycle itself and does not use the digest.
+    digest = activity.SleepDigest()
+    live = LiveLine(sys.stdout, enabled=_live_line_enabled(config))
+    _LIVE = live
 
     def _note_acquire_failure() -> None:
         nonlocal acquire_retry_at
         acquire_retry_at = time.monotonic() + _ACQUIRE_RETRY_SECONDS
+
+    def _remember_pending_sleep() -> None:
+        """Keep ``lf coffee status`` on the running total before it is printed.
+
+        The foreground log stays quiet. The saved sleep event is the same
+        sentence the catch-up line will use, growing as dark wakes arrive.
+        """
+        if config.verbose or not digest.pending:
+            return
+        text, at = digest.catch_up()
+        events["sleep"] = {"text": text, "at": at}
+        events.pop("wake", None)
 
     try:
         while True:
@@ -1000,22 +1111,19 @@ def serve(config: CoffeeConfig) -> None:
                 hold=controller.held,
                 verbose=config.verbose,
                 suspended_seconds=suspended_seconds,
+                sleep_digest=None if config.verbose else digest,
             )
-            if (
-                snapshot.want_hold
-                and not controller.held
-                and time.monotonic() >= acquire_retry_at
-                and not any(step.kind == "acquire" for step in steps)
-            ):
-                # A retry while the lid is open stays quiet. Closing the lid, or
-                # --verbose, is when a successful acquire is worth a line.
-                steps.append(
-                    activity.StatusStep(
-                        "acquire",
-                        "",
-                        quiet=not config.verbose and snapshot.lid != "closed",
-                    )
-                )
+            steps = _acquire_steps_for_poll(
+                steps,
+                now=time.monotonic(),
+                retry_at=acquire_retry_at,
+                want_hold=snapshot.want_hold,
+                held=controller.held,
+                quiet=not config.verbose and snapshot.lid != "closed",
+            )
+            # A flush already cleared the digest and put the summary in
+            # ``steps``. A pending digest is the running total for status.
+            _remember_pending_sleep()
             _remember_events(events, steps, now=time.time())
             _apply_steps(steps, controller, state_dir, on_acquire_failure=_note_acquire_failure)
             if controller.held:
@@ -1028,6 +1136,15 @@ def serve(config: CoffeeConfig) -> None:
             if time.monotonic() - last_maintenance >= 60:
                 _maintain(controller, warned)
                 last_maintenance = time.monotonic()
+            # Draw after every log line this poll, so the status row sits
+            # underneath them for the wait.
+            live.draw(
+                activity.format_live_status(
+                    snapshot,
+                    hold=controller.held,
+                    digest=None if config.verbose else digest,
+                )
+            )
             wait_wall = time.time()
             wait_mono = time.monotonic()
             time.sleep(config.poll_seconds)
@@ -1042,17 +1159,28 @@ def serve(config: CoffeeConfig) -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        # Ctrl+C and SIGTERM land here. Release only when this process still
-        # owns the hold; an idle session just says it is stopping.
-        if controller.held:
-            _release_for_exit(controller)
-        else:
-            emit("stopping")
-        if previous is not None:
-            try:
-                _write_json(state_path, _state_payload(controller, previous, config, events))
-            except OSError:
-                pass
+        # Ctrl+C and SIGTERM land here. A digest that was never flushed is
+        # printed first, so quitting without opening the lid still records
+        # the night. Then release only when this process still owns the hold.
+        try:
+            if not config.verbose and digest.pending:
+                text, at = digest.catch_up()
+                emit(text)
+                events["sleep"] = {"text": text, "at": at}
+                events.pop("wake", None)
+                digest.clear()
+            if controller.held:
+                _release_for_exit(controller)
+            else:
+                emit("stopping")
+            if previous is not None:
+                try:
+                    _write_json(state_path, _state_payload(controller, previous, config, events))
+                except OSError:
+                    pass
+        finally:
+            live.close()
+            _LIVE = None
 
 
 def _status() -> None:
@@ -1144,20 +1272,22 @@ def coffee(
         "--verbose",
         help=(
             "Print a line on every poll, plus every agent and hold change, "
-            "and print maintenance wakes. The default stays quiet while the "
-            "lid is open and prints a summary when the lid closes."
+            "and print each sleep cycle as it happens. The default keeps a "
+            "live status line and one catch-up summary when you look again."
         ),
     ),
 ) -> None:
     """Hold this Mac awake while a local Cursor agent is working.
 
-    Runs in the foreground. With the lid open it stays quiet while it keeps
-    the sleep hold in step with local agents. When the lid closes it prints
-    one summary: clamshell or not, how many agents, and whether Wi-Fi is up.
-    A closed lid without an external display is not clamshell mode; coffee
-    turns Wi-Fi back on if macOS powered the radio off. Cloud agents do not
-    keep the hold. A connection error is not treated as the agent finishing.
-    The Mac actually sleeping is one summary, printed after it wakes.
+    Runs in the foreground. After the password, one line says the session
+    started. With the lid open a single status line shows the hold and
+    rewrites itself; the log stays quiet while the hold tracks local agents.
+    When the lid closes it prints one summary: clamshell or not, how many
+    agents, and whether Wi-Fi is up. A closed lid without an external display
+    is not clamshell mode; coffee turns Wi-Fi back on if macOS powered the
+    radio off. Cloud agents do not keep the hold. A connection error is not
+    treated as the agent finishing. Dark wakes become one summary when you
+    open the lid or wake the Mac from the keyboard, trackpad, or power button.
     Ctrl+C restores sleep settings before exiting.
     """
     if ctx.invoked_subcommand is not None:
