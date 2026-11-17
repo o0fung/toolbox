@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lf-toolbox"
 version = "1.16.2"
-description = "CLI toolbox with tree/work, YouTube helpers, terminal clock, cheque wording, file compression, CSV plotting, Markdown notes, and a macOS awake hold for local Cursor agents."
+description = "CLI toolbox with tree/work, YouTube helpers, terminal clock, cheque wording, file compression, CSV plotting, Markdown notes, and a macOS awake hold for the whole lf coffee session."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"

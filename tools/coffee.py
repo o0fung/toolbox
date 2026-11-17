@@ -1,9 +1,9 @@
-"""Hold a Mac awake while a local Cursor agent is working.
+"""Hold a Mac awake for the whole ``lf coffee`` session.
 
-``lf coffee`` polls on-disk Cursor state and keeps the machine awake only
-during local IDE or cursor-agent work. Cloud agents are ignored. The hold
-is released when every local agent is idle, including a plan-mode pause,
-and again on exit.
+``lf coffee`` keeps the machine awake until the process exits, whether or
+not a local Cursor agent is busy. The status line still names local agents.
+Cloud agents are left off that line. The screen may sleep. The hold ends
+on exit, and on battery when ``--ac-only`` is set.
 
 Amphetamine is preferred when it is installed and Session Defaults already
 disallow system sleep with the display closed. coffee cannot change that
@@ -21,7 +21,7 @@ closes, and when that closed-lid decision changes. Dark wakes stay in a
 running total until you open the lid or wake the Mac from the keyboard,
 trackpad, or power button; then one line covers the whole stretch.
 ``--verbose`` prints every cycle, agent, and hold change. Releasing the
-hold is not system sleep.
+hold is not system sleep. Agent idle time does not release it.
 """
 
 from __future__ import annotations
@@ -61,7 +61,9 @@ app = new_typer_app()
 _LOCK_FD: int | None = None
 # After a failed acquire, wait this long before prompting again.
 _ACQUIRE_RETRY_SECONDS = 300
-# Transient observation errors keep an existing hold this many polls, then release.
+# With --ac-only, this many failed polls in a row release the hold so a stuck
+# power read cannot pin a laptop that might be on battery. The default
+# (battery allowed) keeps the hold for the whole session.
 _OBSERVATION_FAILURES_BEFORE_RELEASE = 3
 
 
@@ -182,7 +184,7 @@ def require_macos() -> None:
     if sys.platform == "darwin":
         return
     fatal(
-        "lf coffee keeps a Mac awake while a local Cursor agent is working. "
+        "lf coffee keeps a Mac awake until you stop it. "
         "It drives Amphetamine or `pmset disablesleep`, which exist only on macOS. "
         f"This machine is {sys.platform}; sleep settings were not changed."
     )
@@ -548,8 +550,9 @@ def _emit_details(config: CoffeeConfig, readiness: awake.AmphetamineReadiness) -
             "coffee did not change that checkbox."
         )
     emit(
-        "detection is heuristic (local transcripts and composer status) and may need "
-        f"--idle-seconds tuning. Cloud agents are ignored. "
+        "The sleep hold stays on until coffee exits. "
+        "Agent lines are heuristic (local transcripts and composer status) and may need "
+        f"--idle-seconds tuning. That timer does not release the hold. Cloud agents are ignored. "
         "Lid state is best-effort. With the lid open the log stays quiet. "
         "A closed lid without an external display is not clamshell mode; "
         "coffee turns Wi-Fi back on if macOS powered the radio off. "
@@ -652,19 +655,20 @@ def _observe(config: CoffeeConfig) -> activity.MonitorSnapshot:
     platform = awake.read_platform_state()
     power = awake.read_power_source()
     transition = activity.transition_hold(
-        phase=decision.phase,
         power=power,
         allow_battery=config.allow_battery,
     )
-    block = transition.reason if decision.phase is activity.AgentPhase.BUSY and not transition.hold else None
+    block = None if transition.hold else transition.reason
     recorded = platform.power
     external_display: bool | None = None
     wifi_note: str | None = None
-    # Only a closed lid needs the display and Wi-Fi read. Restoring the radio
-    # is limited to a busy agent with no external display: real clamshell
-    # already keeps the network up, and an idle closed lid is allowed to sleep.
+    # Only a closed lid needs the display and Wi-Fi read. Restore the radio
+    # while this poll wants the hold, including when no agent is busy: a shut
+    # lid can power Wi-Fi off, and the session is still supposed to stay awake.
+    # Real clamshell already keeps the network up. --ac-only on battery does
+    # not fight the radio, because that session is allowed to sleep.
     if platform.lid.position == "closed":
-        network = awake.assess_closed_lid_network(restore_wifi=bool(decision.agents))
+        network = awake.assess_closed_lid_network(restore_wifi=transition.hold)
         external_display = network.external_display
         wifi_note = network.wifi_note
     return activity.MonitorSnapshot(
@@ -922,22 +926,23 @@ def _maybe_open_setup_helper(
 
 
 def serve(config: CoffeeConfig) -> None:
-    """Poll local Cursor activity and hold sleep only while it is busy.
+    """Poll until coffee exits, and hold sleep for that whole session.
 
     Each iteration reads the lid, the last system sleep/wake, the power
-    source, and local agent signals. With the lid open the hold still tracks
-    agents. A foreground terminal shows that as one rewriting status line,
-    not a log row per agent. A closed lid prints one summary, including
-    whether an external display makes this clamshell and whether Wi-Fi is
-    up. While the lid stays closed, the next log line is a hold change or
-    Wi-Fi crossing to still-down. Dark wakes accumulate until the lid opens
-    or a keyboard, trackpad, or power-button wake, then one summary covers
-    the whole stretch. ``--verbose`` keeps the per-agent lines and lists
-    each sleep cycle as it happens.
+    source, and local agent signals. The hold follows power, not agents.
+    A foreground terminal shows that as one rewriting status line, not a
+    log row per agent. A closed lid prints one summary, including whether
+    an external display makes this clamshell and whether Wi-Fi is up.
+    While the lid stays closed, the next log line is an agent-count change,
+    a hold change, or Wi-Fi crossing to still-down. Dark wakes accumulate
+    until the lid opens or a keyboard, trackpad, or power-button wake, then
+    one summary covers the whole stretch. ``--verbose`` keeps the per-agent
+    lines and lists each sleep cycle as it happens.
 
-    Observation errors do not immediately drop a hold that is already on.
-    Three failed polls in a row release it, so a stuck reader cannot pin the
-    Mac awake. A failed acquire is retried after a few minutes, not every poll.
+    Observation errors do not drop the hold when battery is allowed. With
+    ``--ac-only``, three failed polls in a row release it, so a stuck power
+    read cannot pin a laptop that might be on battery. A failed acquire is
+    retried after a few minutes, not every poll.
     """
     global _LIVE
     require_macos()
@@ -1061,9 +1066,14 @@ def serve(config: CoffeeConfig) -> None:
                 snapshot = _observe(config)
                 observation_failures = 0
             except Exception as exc:
-                # Keep the previous busy set across a short I/O blip so one
-                # failed ioreg/pmset/sqlite read does not sleep the Mac under
-                # an agent. Repeated failure releases instead of holding forever.
+                # Flow for a failed poll:
+                # 1. Fewer than three failures, and a hold is already on:
+                #    reuse the previous snapshot so one bad ioreg/pmset/sqlite
+                #    read does not flap the status line.
+                # 2. Otherwise, battery allowed (the default): still want the
+                #    hold. A failed read is not a request to sleep.
+                # 3. ``--ac-only``: release. Power cannot be shown to be AC,
+                #    and a stuck reader must not pin a laptop on battery.
                 observation_failures += 1
                 warning = f"observation failed ({exc})"
                 if (
@@ -1076,6 +1086,7 @@ def serve(config: CoffeeConfig) -> None:
                     # Keep the last sleep/wake identity. Clearing it would make
                     # the next good poll look like a baseline, and a real wake
                     # during the blip would never be printed.
+                    want_hold = config.allow_battery
                     failed = activity.MonitorSnapshot(
                         lid="unknown",
                         lid_detail="best-effort; observation failed",
@@ -1083,7 +1094,7 @@ def serve(config: CoffeeConfig) -> None:
                         phase=activity.AgentPhase.IDLE,
                         reason=warning,
                         power="unknown",
-                        want_hold=False,
+                        want_hold=want_hold,
                         block_reason=None,
                         warning=warning,
                     )
@@ -1238,7 +1249,10 @@ def coffee(
     idle_seconds: int = typer.Option(
         activity.DEFAULT_IDLE_SECONDS,
         "--idle-seconds",
-        help="Release the hold after this many seconds without local agent output.",
+        help=(
+            "Seconds without local agent output before the status line counts "
+            "that session as idle. Does not release the sleep hold."
+        ),
     ),
     poll_seconds: int = typer.Option(
         activity.DEFAULT_POLL_SECONDS,
@@ -1277,18 +1291,20 @@ def coffee(
         ),
     ),
 ) -> None:
-    """Hold this Mac awake while a local Cursor agent is working.
+    """Keep this Mac awake until coffee exits.
 
     Runs in the foreground. After the password, one line says the session
-    started. With the lid open a single status line shows the hold and
-    rewrites itself; the log stays quiet while the hold tracks local agents.
-    When the lid closes it prints one summary: clamshell or not, how many
-    agents, and whether Wi-Fi is up. A closed lid without an external display
-    is not clamshell mode; coffee turns Wi-Fi back on if macOS powered the
-    radio off. Cloud agents do not keep the hold. A connection error is not
-    treated as the agent finishing. Dark wakes become one summary when you
-    open the lid or wake the Mac from the keyboard, trackpad, or power button.
-    Ctrl+C restores sleep settings before exiting.
+    started. The sleep hold stays on whether or not a local Cursor agent is
+    busy. The screen may still sleep. With the lid open a single status line
+    shows the hold and rewrites itself; the log stays quiet. When the lid
+    closes it prints one summary: clamshell or not, how many agents, and
+    whether Wi-Fi is up. A closed lid without an external display is not
+    clamshell mode; coffee turns Wi-Fi back on if macOS powered the radio
+    off while the hold is on. ``--ac-only`` skips the hold on battery.
+    Cloud agents appear only as status and do not change the hold. Dark
+    wakes become one summary when you open the lid or wake the Mac from the
+    keyboard, trackpad, or power button. Ctrl+C restores sleep settings
+    before exiting.
     """
     if ctx.invoked_subcommand is not None:
         return

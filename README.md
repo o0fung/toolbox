@@ -12,7 +12,7 @@ A set of useful command-line tools for enhancing productivity.
 - **compress**: Compress PDF files with Ghostscript and videos to smaller MP4 files with FFmpeg.
 - **plot**: Plot CSV data with pyqtgraph subplots.
 - **note**: Create, organize, list, and open timestamped Markdown notes.
-- **coffee**: On macOS, keep the Mac awake while a local Cursor agent is working, then let it sleep when that work is idle.
+- **coffee**: On macOS, keep the Mac awake for the whole `lf coffee` session, whether or not a local Cursor agent is busy.
 
 ## Installation
 
@@ -610,20 +610,19 @@ The `browser` setting is an optional command template for `--browse`; `%s` is re
 
 ## 🚩 coffee
 
-Keep a Mac awake while a **local** Cursor agent is working, including with the lid closed, then allow sleep when that work is finished. Cloud agents do not hold the machine awake.
+Keep a Mac awake for the whole `lf coffee` session, including with the lid closed. A local Cursor agent is shown on the status line and does not decide the hold. The screen may still sleep. The hold ends when you quit coffee, and on battery when `--ac-only` is set. Cloud agents are ignored on the status line.
 
-Foreground is the default so the terminal shows the session. After the password, one line says the session started. While the lid is open, coffee still takes and releases the sleep hold, and it does not add a log line for that. A foreground terminal keeps one status line at the bottom (`lid open · 1 local agent · hold on`) and rewrites it on each poll. A real line is printed when the lid closes and when that closed-lid decision changes. Dark wakes are kept until you open the lid, or wake the Mac from the keyboard, trackpad, or power button; then one line covers the whole stretch (`--verbose` also prints every sleep cycle, every agent and hold change, and every poll). A background run and a pipe stay append-only: they get the session line, the lid line, and the catch-up, not the rewriting row.
+Foreground is the default so the terminal shows the session. After the password, one line says the session started. While the lid is open, coffee takes the sleep hold and does not add a log line for that. A foreground terminal keeps one status line at the bottom (`lid open · idle · hold on`) and rewrites it on each poll. A real line is printed when the lid closes and when that closed-lid decision changes. Dark wakes are kept until you open the lid, or wake the Mac from the keyboard, trackpad, or power button; then one line covers the whole stretch (`--verbose` also prints every sleep cycle, every agent and hold change, and every poll). A background run and a pipe stay append-only: they get the session line, the lid line, and the catch-up, not the rewriting row.
 
 ```text
 2026-11-07 07:44:40  lid closed; no external display, so this is not clamshell; 1 local agent busy; sleep hold on; Wi-Fi on
 2026-11-07 07:44:40    Fix cache (id abc, workspace ~/src/api)
-2026-11-07 07:51:02  local agents idle; releasing sleep hold
-2026-11-07 07:51:02  hold off (Amphetamine session ended)
-2026-11-07 08:05:16  asleep 07:51:10–08:05:01 · 14m · 3 sleeps, 2 dark wakes · last wake lid
-2026-11-07 08:05:16  lid opened
+2026-11-07 07:51:02  lid closed; no external display, so this is not clamshell; no local agent busy; sleep hold on; Wi-Fi on
+2026-11-07 08:05:16  stopping; releasing sleep hold
+2026-11-07 08:05:16  hold off (Amphetamine session ended)
 ```
 
-An external display, power, and an external keyboard and mouse is Apple's clamshell mode. The lid line then says `clamshell (external display connected)`. Without the display, closing the lid is not clamshell. Coffee keeps the sleep hold and, while a local agent is busy, turns the Wi-Fi radio back on if macOS powered it off. `Wi-Fi still down; agent is not finished` means the radio is on with no route, or it would not stay on. The antennas are in the display, so a shut lid can still be too weak to hold a connection.
+An external display, power, and an external keyboard and mouse is Apple's clamshell mode. The lid line then says `clamshell (external display connected)`. Without the display, closing the lid is not clamshell. Coffee keeps the sleep hold and, while that hold is on, turns the Wi-Fi radio back on if macOS powered it off. `Wi-Fi still down; agent is not finished` means the radio is on with no route, or it would not stay on. The antennas are in the display, so a shut lid can still be too weak to hold a connection.
 
 If Amphetamine is missing or not ready for a closed lid, startup is two lines and then the password. After the password is accepted, one line says the session started. The same line is printed when no password is needed. The checkbox steps stay on `lf coffee setup` and `lf coffee status`. `--verbose` prints them after the password.
 
@@ -632,7 +631,7 @@ If Amphetamine is missing or not ready for a closed lid, startup is two lines an
 2026-11-07 07:43:01  Amphetamine is not installed. Password once for this run.
 Password:
 2026-11-07 07:43:08  coffee session started
-lid open · idle · hold off
+lid open · idle · hold on
 ```
 
 ```sh
@@ -658,7 +657,7 @@ Lid state comes from IORegistry `AppleClamshellState` (`Yes` means closed). That
 - Otherwise coffee uses pmset and says so in one line before the password. `lf coffee status` and `lf coffee setup` still print the checkbox steps. The first foreground start also opens the App Store page, or Amphetamine if it is installed but the checkbox is still on. Later starts do not open the page again. `lf coffee setup` opens it on demand (`mas open` when the `mas` CLI is installed, otherwise the public App Store URL; the app itself when it is already installed).
 - The password is once per run. coffee runs `sudo -v`, then a root helper applies `pmset -a disablesleep`. The helper stays root, so a later sleep does not ask again. `sudo lf coffee` does not ask a second time; Cursor files and the state directory still come from the user who invoked sudo. The previous value is restored on normal exit, Ctrl+C / SIGTERM, and if the coffee process dies. If both the daemon and the helper are killed, the next `lf coffee` clears a leftover `disablesleep`. `caffeinate` is not used; it does not keep the Mac awake with the lid closed.
 
-Battery holds sleep by default, including when the power source cannot be read. The battery can run down while a local agent is busy, including with the lid closed. The hold still drops when every local agent is idle. `lf coffee --ac-only` requires AC power and reports the agent without holding sleep on battery. `--allow-battery` is the same as the default.
+Battery holds sleep by default, including when the power source cannot be read. The battery can run down for the whole session, including with the lid closed and with no local agent busy. `lf coffee --ac-only` requires AC power and does not hold sleep on battery. `--allow-battery` is the same as the default. `--idle-seconds` only changes when the status line calls an agent idle.
 
 **Detection** is heuristic. There is no Cursor API for "the agent is generating". coffee watches:
 
@@ -666,7 +665,7 @@ Battery holds sleep by default, including when the power source cannot be read. 
 - `~/.cursor/chats/<hash>/<id>/store.db` (local cursor-agent store)
 - `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` `composerHeaders` table (older Cursor builds: `ItemTable` key `composer.composerHeaders`) and `composerData:<id>`
 
-Each status line leads with the chat title from the composer header. When that title is missing, the line uses about the first 80 characters of the first user message, so a session is not shown as only its id. A fresh transcript counts as busy. A local run also stays busy while `unfinishedRunAt` is set and the newest of the conversation checkpoint, `lastUpdatedAt`, and that run stamp is inside 30 minutes, including through a quiet stretch with no new transcript writes. That includes plan mode before the plan is handed over. `status: generating` still counts. A transcript whose last record is an error `turn_ended` (a failed model connection) stays busy for that same 30 minutes, including when a pending plan is also set, because Cursor retries without writing the file. A bare `turn_ended` between steps does not. Plan approval, `hasPendingPlan`, a blocking question, `CreatePlan`, `AskQuestion`, and phrases such as "waiting for you to execute" release the hold immediately when the turn did not end in that error. A transcript with no unfinished run and no error ending drops after `--idle-seconds` (default 120) without local agent output. An unfinished run is not cleared by that quiet period. Composer rows tagged as background/cloud agents are ignored. A `generating` status, an unfinished run, or an error ending that never updates again is ignored after 30 minutes.
+Each status line leads with the chat title from the composer header. When that title is missing, the line uses about the first 80 characters of the first user message, so a session is not shown as only its id. A fresh transcript counts as busy. A local run also stays busy while `unfinishedRunAt` is set and the newest of the conversation checkpoint, `lastUpdatedAt`, and that run stamp is inside 30 minutes, including through a quiet stretch with no new transcript writes. That includes plan mode before the plan is handed over. `status: generating` still counts. A transcript whose last record is an error `turn_ended` (a failed model connection) stays busy for that same 30 minutes, including when a pending plan is also set, because Cursor retries without writing the file. A bare `turn_ended` between steps does not. Plan approval, `hasPendingPlan`, a blocking question, `CreatePlan`, `AskQuestion`, and phrases such as "waiting for you to execute" count the session as idle on the status line immediately when the turn did not end in that error. They do not release the sleep hold. A transcript with no unfinished run and no error ending counts as idle after `--idle-seconds` (default 120) without local agent output. An unfinished run is not cleared by that quiet period. Composer rows tagged as background/cloud agents are ignored. A `generating` status, an unfinished run, or an error ending that never updates again is ignored after 30 minutes.
 
 ---
 
@@ -685,7 +684,7 @@ tools/
 	compress.py   # PDF/video compression helpers
 	plot.py       # CSV plotting with pyqtgraph (PyQt6)
 	note.py       # Timestamped Markdown note manager
-	coffee.py     # macOS awake hold while a local Cursor agent works
+	coffee.py     # macOS awake hold for the whole coffee session
 	coffee_activity.py # Local-agent activity heuristic
 	coffee_awake.py    # Amphetamine / pmset hold and restore
 tests/
