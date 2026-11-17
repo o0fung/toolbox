@@ -771,18 +771,58 @@ class ScanActivityTests(unittest.TestCase):
 @unittest.skipIf(coffee_activity is None, f"Missing dependency: {_IMPORT_ERROR}")
 class HoldAndStatusTests(unittest.TestCase):
     def test_power_gate(self) -> None:
-        busy = coffee_activity.AgentPhase.BUSY
-        idle = coffee_activity.AgentPhase.IDLE
-        self.assertTrue(coffee_activity.transition_hold(phase=busy, power="ac", allow_battery=False).hold)
-        battery = coffee_activity.transition_hold(phase=busy, power="battery", allow_battery=False)
+        # The hold follows power for the whole session. Agent phase is not an input.
+        ac = coffee_activity.transition_hold(power="ac", allow_battery=False)
+        self.assertTrue(ac.hold)
+        self.assertEqual(ac.reason, "keeping awake")
+        battery = coffee_activity.transition_hold(power="battery", allow_battery=False)
         self.assertFalse(battery.hold)
         self.assertIn("--ac-only", battery.reason)
-        unknown = coffee_activity.transition_hold(phase=busy, power="unknown", allow_battery=False)
+        unknown = coffee_activity.transition_hold(power="unknown", allow_battery=False)
         self.assertFalse(unknown.hold)
         self.assertIn("--ac-only", unknown.reason)
-        self.assertTrue(coffee_activity.transition_hold(phase=busy, power="battery", allow_battery=True).hold)
-        self.assertTrue(coffee_activity.transition_hold(phase=busy, power="unknown", allow_battery=True).hold)
-        self.assertFalse(coffee_activity.transition_hold(phase=idle, power="ac", allow_battery=True).hold)
+        on_battery = coffee_activity.transition_hold(power="battery", allow_battery=True)
+        self.assertTrue(on_battery.hold)
+        self.assertEqual(on_battery.reason, "keeping awake on battery")
+        unknown_ok = coffee_activity.transition_hold(power="unknown", allow_battery=True)
+        self.assertTrue(unknown_ok.hold)
+        self.assertEqual(unknown_ok.reason, "keeping awake; power source unknown")
+        idle_ac = coffee_activity.transition_hold(power="ac", allow_battery=True)
+        self.assertTrue(idle_ac.hold)
+        self.assertEqual(idle_ac.reason, "keeping awake")
+
+    def test_idle_session_keeps_the_hold(self) -> None:
+        busy = _snap(
+            agents=(_agent(),),
+            phase=coffee_activity.AgentPhase.BUSY,
+            want_hold=True,
+        )
+        idle = _snap(want_hold=True)
+        open_steps = coffee_activity.plan_status_events(busy, idle, hold=True, home=HOME)
+        self.assertEqual(open_steps, [])
+        closed_busy = _snap(
+            lid="closed",
+            agents=(_agent(),),
+            phase=coffee_activity.AgentPhase.BUSY,
+            want_hold=True,
+            external_display=False,
+            wifi_note="Wi-Fi on",
+        )
+        closed_idle = _snap(
+            lid="closed",
+            want_hold=True,
+            external_display=False,
+            wifi_note="Wi-Fi on",
+        )
+        closed_steps = coffee_activity.plan_status_events(closed_busy, closed_idle, hold=True, home=HOME)
+        self.assertEqual(
+            [step.text for step in closed_steps],
+            [
+                "lid closed; no external display, so this is not clamshell; "
+                "no local agent busy; sleep hold on; Wi-Fi on"
+            ],
+        )
+        self.assertNotIn("release", [step.kind for step in closed_steps])
 
     def test_session_lines_follow_lid_agent_and_hold_changes(self) -> None:
         """Lid-open work is silent. The lid close is one summary."""

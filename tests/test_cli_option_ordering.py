@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 from typing import Sequence, Tuple
 
@@ -115,11 +116,11 @@ class CallbackOptionOrderingPhaseOneTests(unittest.TestCase):
         before_ctx = _group_context(command, ["-q", "screen", "/tmp/in.pdf"])
         after_ctx = _group_context(command, ["/tmp/in.pdf", "-q", "screen"])
 
-        self.assertEqual(before_ctx.params["input_pdf"], "/tmp/in.pdf")
+        self.assertEqual(os.fspath(before_ctx.params["input_pdf"]), "/tmp/in.pdf")
         self.assertEqual(before_ctx.params["quality"], "screen")
         self.assertEqual(before_ctx.args, [])
 
-        self.assertEqual(after_ctx.params["input_pdf"], "/tmp/in.pdf")
+        self.assertEqual(os.fspath(after_ctx.params["input_pdf"]), "/tmp/in.pdf")
         self.assertEqual(after_ctx.params["quality"], "screen")
         self.assertEqual(after_ctx.args, [])
 
@@ -130,11 +131,11 @@ class CallbackOptionOrderingPhaseOneTests(unittest.TestCase):
         before_ctx = _group_context(command, ["--crf", "30", "/tmp/in.mov"])
         after_ctx = _group_context(command, ["/tmp/in.mov", "--crf", "30"])
 
-        self.assertEqual(before_ctx.params["input_video"], "/tmp/in.mov")
+        self.assertEqual(os.fspath(before_ctx.params["input_video"]), "/tmp/in.mov")
         self.assertEqual(before_ctx.params["crf"], 30)
         self.assertEqual(before_ctx.args, [])
 
-        self.assertEqual(after_ctx.params["input_video"], "/tmp/in.mov")
+        self.assertEqual(os.fspath(after_ctx.params["input_video"]), "/tmp/in.mov")
         self.assertEqual(after_ctx.params["crf"], 30)
         self.assertEqual(after_ctx.args, [])
 
@@ -162,11 +163,11 @@ class CallbackOptionOrderingPhaseOneTests(unittest.TestCase):
         before_ctx = _group_context(command, ["-f", "work", "Project", "ideas"])
         after_ctx = _group_context(command, ["Project", "ideas", "-f", "work"])
 
-        self.assertEqual(before_ctx.params["selector"], ("Project", "ideas"))
+        self.assertEqual(tuple(before_ctx.params["selector"]), ("Project", "ideas"))
         self.assertEqual(before_ctx.params["subfolder"], "work")
         self.assertEqual(before_ctx.args, [])
 
-        self.assertEqual(after_ctx.params["selector"], ("Project", "ideas"))
+        self.assertEqual(tuple(after_ctx.params["selector"]), ("Project", "ideas"))
         self.assertEqual(after_ctx.params["subfolder"], "work")
         self.assertEqual(after_ctx.args, [])
 

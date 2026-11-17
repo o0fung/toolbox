@@ -14,9 +14,10 @@ reads on-disk state that current Cursor releases actually write:
   progress, including plan mode. ``status == "generating"`` still counts.
   ``unifiedMode`` is ``agent``, ``chat``, ``edit``, or ``plan``.
 
-Cloud / background agents are ignored. Their rows are tagged with ``bcId``,
-a background ``unifiedMode``, or similar fields, and ``backgroundComposer``
-state is not treated as local work. Those runs do not need this Mac awake.
+Cloud / background agents are ignored on the status line. Their rows are
+tagged with ``bcId``, a background ``unifiedMode``, or similar fields, and
+``backgroundComposer`` state is not treated as local work. The sleep hold
+does not depend on that list.
 
 Limitations: without ``unfinishedRunAt``, a long silent tool call can look
 idle once the transcript mtime and composer ``lastUpdatedAt`` go quiet.
@@ -1277,24 +1278,23 @@ def scan_activity(
         return _idle(f"detection failed ({exc})", "error", str(exc))
 
 
-def transition_hold(*, phase: AgentPhase, power: str, allow_battery: bool) -> HoldTransition:
-    """Map activity and power onto the desired sleep hold.
+def transition_hold(*, power: str, allow_battery: bool) -> HoldTransition:
+    """Map power onto the sleep hold for a running coffee session.
 
-    Sleep is held on AC, on battery, and when the power source is unknown.
-    ``--ac-only`` requires AC: battery and a failed ``pmset`` read do not
-    hold. Idle, including a plan-mode pause, always releases.
+    A running session holds sleep on AC, on battery, and when the power
+    source is unknown. Agent activity does not release it. ``--ac-only``
+    requires AC: battery and a failed ``pmset`` read do not hold. The hold
+    ends when the process exits.
     """
-    if phase is AgentPhase.BUSY:
-        if power == "ac" or (allow_battery and power in {"battery", "unknown"}):
-            if power == "battery":
-                return HoldTransition(True, "agent busy; holding on battery")
-            if power == "unknown" and allow_battery:
-                return HoldTransition(True, "agent busy; power source unknown")
-            return HoldTransition(True, "agent busy")
+    if power == "ac" or (allow_battery and power in {"battery", "unknown"}):
         if power == "battery":
-            return HoldTransition(False, "on battery; --ac-only requires AC power")
-        return HoldTransition(False, "power source unknown; --ac-only requires AC power")
-    return HoldTransition(False, "agent idle")
+            return HoldTransition(True, "keeping awake on battery")
+        if power == "unknown" and allow_battery:
+            return HoldTransition(True, "keeping awake; power source unknown")
+        return HoldTransition(True, "keeping awake")
+    if power == "battery":
+        return HoldTransition(False, "on battery; --ac-only requires AC power")
+    return HoldTransition(False, "power source unknown; --ac-only requires AC power")
 
 
 def display_path(path: str, home: str) -> str:
@@ -1795,9 +1795,10 @@ def _closed_lid_summary(current: MonitorSnapshot, *, hold: bool) -> str:
     """One line for a lid close or a closed-lid decision change.
 
     The display clause is omitted when this poll could not read displays.
-    No agents is the sleep path. Busy agents name the hold and the Wi-Fi
-    result. ``Wi-Fi still down`` keeps the explicit "not finished" so a
-    dead radio is not reported as the agent ending.
+    Agent counts are status only. Sleep follows ``want_hold``, not whether
+    a local agent is busy. ``Wi-Fi still down`` keeps the explicit
+    "not finished" while an agent is busy, so a dead radio is not reported
+    as the agent ending.
 
     ``hold`` is the hold already confirmed. A hold this poll still has to
     take is omitted here; the acquire step prints ``hold on`` after it is set.
@@ -1809,22 +1810,25 @@ def _closed_lid_summary(current: MonitorSnapshot, *, hold: bool) -> str:
         parts.append("no external display, so this is not clamshell")
     if not current.agents:
         parts.append("no local agent busy")
-        parts.append("Mac may sleep")
-        return "; ".join(parts)
-    count = len(current.agents)
-    noun = "local agent" if count == 1 else "local agents"
-    parts.append(f"{count} {noun} busy")
+    else:
+        count = len(current.agents)
+        noun = "local agent" if count == 1 else "local agents"
+        parts.append(f"{count} {noun} busy")
+    # "Mac may sleep" is only the path that is not asking for a hold.
+    # A session that still wants the hold must say so even with no agent.
     if current.want_hold and hold:
         parts.append("sleep hold on")
     elif current.want_hold:
         pass
     elif current.block_reason:
         parts.append(f"sleep hold off ({current.block_reason})")
-    else:
+    elif current.agents:
         parts.append("sleep hold off")
+    else:
+        parts.append("Mac may sleep")
     if current.wifi_note:
         parts.append(current.wifi_note)
-    if _wifi_is_down(current.wifi_note):
+    if current.agents and _wifi_is_down(current.wifi_note):
         parts.append("agent is not finished")
     return "; ".join(parts)
 
@@ -1841,8 +1845,8 @@ def _plan_quiet_status_events(
     """Lines for sleep, lid close, and a hold change while the lid stays closed.
 
     The lid-open stretch prints nothing about agents or the hold. The hold
-    still tracks local agents, quietly, so closing the lid cannot outrun the
-    next poll. A failed acquire or release is printed by the daemon itself.
+    still follows ``want_hold`` on each poll, so closing the lid cannot
+    outrun it. A failed acquire or release is printed by the daemon itself.
 
     Flow:
     1. Append this poll's power gap to ``sleep_digest``. Dark wakes and
@@ -1853,9 +1857,11 @@ def _plan_quiet_status_events(
     2. Lid open: quiet acquire and quiet release. After a closed lid, one
        ``lid opened`` line, after the sleep summary. A detection warning
        still prints.
-    3. Lid just closed, the busy/idle hold flipped, or Wi-Fi crossed between
-       up and still-down: one summary. Agent names follow only while someone
-       is busy. A closed-lid release stays loud so the restore note is visible.
+    3. Lid just closed, the agent count changed, the hold flipped, or Wi-Fi
+       crossed between up and still-down: one summary. Agent names follow
+       only while someone is busy. Agents finishing while the hold stays on
+       replace that summary and do not release. A closed-lid release stays
+       loud so the restore note is visible.
     """
     steps: list[StatusStep] = []
     home_path = str(real_home()) if home is None else home
@@ -1937,6 +1943,10 @@ def _plan_quiet_status_events(
                     log(f"  {format_agent(agent, home=home_path)}")
         elif hold and not current.want_hold:
             log("local agents idle; releasing sleep hold")
+        elif was_closed and was_busy and not now_busy and current.want_hold:
+            # Agents finished. The session still wants sleep held, so replace
+            # the busy summary instead of releasing.
+            log(_closed_lid_summary(current, hold=hold))
     # The summary omits "sleep hold on" until the hold is already set.
     # A closed lid that still needs it prints "hold on" after acquire.
     hold_steps(quiet_acquire=not (not hold and current.want_hold), quiet_release=False)
@@ -2001,10 +2011,11 @@ def _plan_verbose_status_events(
     Maintenance wakes are printed only with ``verbose``, unless the Mac slept
     while the sleep hold was still on.
 
-    When the last busy agent finishes while the hold is on, the plan order is
-    ``agent finished``, then ``all local agents idle; releasing sleep hold``,
+    When ``want_hold`` turns off while the hold is on, the plan order is
+    ``agent finished`` (if the last agent also left), then a releasing line,
     then a ``release`` step. The daemon restores sleep and only then prints
-    ``hold off``.
+    ``hold off``. Agents going idle while ``want_hold`` stays true log
+    ``all local agents idle`` and do not release.
     """
     steps: list[StatusStep] = []
     home_path = str(real_home()) if home is None else home
