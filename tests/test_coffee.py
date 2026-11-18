@@ -2848,6 +2848,19 @@ class CoffeeCliTests(unittest.TestCase):
             coffee_activity.StatusStep("acquire", "", quiet=True),
             coffee_activity.StatusStep("release", ""),
         ]
+        # Session start, and the poll after a hold that stuck: retry time 0
+        # is not a failure wait, so the acquire stays.
+        ready = coffee._acquire_steps_for_poll(
+            queued,
+            now=10,
+            retry_at=0,
+            want_hold=True,
+            held=False,
+            quiet=True,
+        )
+        self.assertEqual([step.kind for step in ready], ["log", "acquire", "release"])
+        self.assertTrue(ready[1].quiet)
+
         waiting = coffee._acquire_steps_for_poll(
             queued,
             now=10,

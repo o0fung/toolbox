@@ -732,11 +732,13 @@ def _acquire_steps_for_poll(
     Flow:
     1. After a failed acquire, ``retry_at`` is a few minutes ahead. Drop
        every acquire the status plan already queued. That plan adds one on
-       every poll while an agent is busy and the hold is off, which would
+       every poll while the hold is wanted and still off, which would
        otherwise log the same failure on every poll.
-    2. Once the backoff has elapsed, keep an acquire the plan already
-       queued. If it did not, and the hold is still wanted, append one.
-       ``quiet`` hides the success line while the lid is open.
+    2. ``retry_at`` of 0 means the failure wait has elapsed, or never
+       started. That is session start, and the poll after a hold that
+       stuck. Keep an acquire the plan already queued. If it did not, and
+       the hold is still wanted, append one. ``quiet`` hides the success
+       line while the lid is open.
     """
     if now < retry_at:
         return [step for step in steps if step.kind != "acquire"]
@@ -1024,7 +1026,10 @@ def serve(config: CoffeeConfig) -> None:
     signal.signal(signal.SIGTERM, _request_stop)
 
     previous: activity.MonitorSnapshot | None = None
-    acquire_retry_at = float("inf")
+    # 0 means "not waiting". A future monotonic time is the pause after
+    # "hold was not taken". Infinity is always in the future, so it would
+    # drop the first acquire and the Mac would sleep with the lid closed.
+    acquire_retry_at = 0.0
     observation_failures = 0
     warned = {"refresh": False, "sudo": False}
     last_maintenance = time.monotonic()
@@ -1137,8 +1142,10 @@ def serve(config: CoffeeConfig) -> None:
             _remember_pending_sleep()
             _remember_events(events, steps, now=time.time())
             _apply_steps(steps, controller, state_dir, on_acquire_failure=_note_acquire_failure)
+            # A hold that stuck clears the failure wait. A later release
+            # (--ac-only on battery, then back on AC) can acquire again.
             if controller.held:
-                acquire_retry_at = float("inf")
+                acquire_retry_at = 0.0
             previous = snapshot
             try:
                 _write_json(state_path, _state_payload(controller, snapshot, config, events))
